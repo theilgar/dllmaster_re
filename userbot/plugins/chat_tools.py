@@ -55,6 +55,7 @@ from telethon.tl.types import Channel, ChannelParticipantsAdmins, Chat, ChatAdmi
 
 from userbot.core.userbot_api import (
     Bar,
+    box_text,
     build_info,
     check_clear_rights,
     ff,
@@ -440,13 +441,7 @@ async def admin_check(client, chat):
 # ─────────────────────────────────────────────────────────────
 def box_info(text: str) -> str:
     """📋 botun /ui ayarlarına görə mətn → kod bloku."""
-    try:
-        from bot.plugins import compact_ui_plugin as cui
-        if cui._on("ui_box"):
-            return cui.boxify(text, True) or text
-    except Exception as _e:
-        logger.debug("udulan xəta [userbot/plugins/chat_tools.py:450]: %r", _e)
-    return text
+    return box_text(text)
 
 
 def register(ub):

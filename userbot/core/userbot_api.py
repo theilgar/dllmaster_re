@@ -196,6 +196,19 @@ async def safe_edit(event_or_msg, text: str):
 # ───────────────────────── 🖥 sistem məlumatı ─────────────────────────
 
 
+def box_text(text: str) -> str:
+    """📋 Botun /ui ayarına görə mətn → kod bloku: birinci sətir qalın başlıq, qalanı <pre> / sitat bloku.
+    Linkli sətirlər blokdan çıxarılıb altına qoyulur (blokda link işləmir) — sətir sırası üçün blok mətnində link yazma.
+    Ayar söndürülübsə, mətn çox uzundursa və ya alınmasa — olduğu kimi qaytarılır."""
+    try:
+        from bot.plugins import compact_ui_plugin as cui
+        if cui._on("ui_box"):
+            return cui.boxify(text, True) or text
+    except Exception as e:
+        logger.debug("box_text: %r", e)
+    return text
+
+
 async def temp_edit(event, text: str, delay: int = 2):
     """Bildirişi göstər, `delay` saniyə sonra komanda mesajını sil (çat təmiz qalsın)."""
     await safe_edit(event, text)
