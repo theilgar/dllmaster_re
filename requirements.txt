@@ -1,0 +1,37 @@
+# DLLMaster Bot — Python paketləri (migrate.py yaratdı)
+
+aiogram>=3.31.0                    # bot
+telethon>=1.45.0                   # userbot
+python-dotenv>=1.2.4               # config.env
+colorlog>=6.12.0                   # loglar
+yt-dlp>=2026.8.19                  # YouTube yükləmə
+spotipy>=2.26.0                    # Spotify
+mutagen>=1.48.1                    # audio teqləri
+aiohttp>=3.14.3                    # HTTP
+requests>=2.34.2                   # Spotify qapaqları
+packaging>=26.2                    # yeniləmə yoxlaması
+ytmusicapi>=1.12.3                 # YT Music axtarışı
+psycopg[binary]>=3.2.0             # PostgreSQL bazası
+psycopg-pool>=3.2.0                # PostgreSQL connection pool
+shazamio>=0.8.1                    # /shazam musiqi tanıma
+
+# ── könüllü (lazım olanı # işarəsini silib aç) ──
+yt-dlp-ejs>=0.8.0                   # YouTube JS challenge (deno/node ilə)
+secretstorage>=3.3.3; sys_platform == "linux"   # yt-dlp: Linux-da Chrome cookie-lərini oxumaq üçün
+# psutil>=7.2.2                    # /htop dəqiq rəqəmlər
+# py-tgcalls>=3.0.0                # 🎙 canlı yayım asistanı (ntgcalls ilə gəlir)
+# edge-tts>=7.2.8                  # .tts yüksək keyfiyyət
+# gTTS>=2.5.4                      # .tts ehtiyat
+# Pillow>=12.3.0                   # stiker → PNG/WebP çevirmə (.sticker)
+# bgutil-ytdlp-pot-provider>=2.0.1 # PO token (403-ə qarşı, docker lazımdır)
+colorama; sys_platform == "win32"     # Windows-da rəngli log
+
+# ── sürətləndiricilər (C / Rust mühərrikləri) ──
+cryptg>=0.6.0                      # ⚡ Telethon MTProto şifrələmə sürətləndiricisi (10-15x)
+orjson>=3.13.0                     # ⚡ C-əsaslı ultra sürətli JSON parseri (10-20x)
+aiodns>=4.0.4                      # ⚡ Asinxron C-Ares DNS həlli
+
+# ── istəyə bağlı (quraşdırmaq: pip install <ad>) ──
+# qrcode>=8.2   — QR ilə giriş
+# uvloop>=0.23  — ⚡ sürətli event loop
+

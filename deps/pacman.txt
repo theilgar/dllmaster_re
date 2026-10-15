@@ -1,0 +1,9 @@
+# Arch Linux (pacman) sistem paketləri
+# '?' ilə başlayanlar könüllüdür
+
+ffmpeg
+deno
+git
+postgresql-libs
+?pacman-contrib
+?fastfetch

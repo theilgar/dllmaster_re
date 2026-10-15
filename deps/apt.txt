@@ -1,0 +1,10 @@
+# Debian / Ubuntu (apt) sistem paketləri
+# '?' ilə başlayanlar könüllüdür
+
+ffmpeg
+nodejs
+git
+libpq-dev
+?fastfetch
+# Qeyd: YouTube (yt-dlp-ejs) üçün JS runtime lazımdır (node>=20 və ya deno).
+# Deno tövsiyə olunur: curl -fsSL https://deno.land/install.sh | sh

@@ -1,0 +1,66 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment variables & credentials
+config.env
+*.env
+*.env.bak
+*.env.*
+!.env.example
+!config.env.example
+
+# Telegram sessions & auth
+*.session
+*.session-journal
+*.session.dead
+*.string
+
+# Database & local data
+*.db
+*.db-shm
+*.db-wal
+*.dump
+data/*.db*
+data/*.session*
+data/*.string*
+data/backups/*
+data/update_backups/*
+data/github/
+
+# Cache & runtime
+.cache
+*.lock
+
+# Downloads & logs
+download/*
+bot_logs/*
+*.log
+
+# Virtual environments
+.venv/
+env/
+venv/
+ENV/
+
+# OS / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Depo növbəsi (restart arası)
+depo_state.json
+data/depo_state.json*
+
+# Runtime data (cookie profilləri, yazılar, hesabatlar, keş) — repoya getməməlidir
+data/yt_profiles/
+data/voice_cache/
+data/records/
+data/audit_reports/
+data/.spotify_cache
+data/log_console.json
+data/va_records/
