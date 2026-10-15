@@ -123,12 +123,73 @@ def setup(context):
             return kw, dest.describe("backup")
         return ({"chat_id": context.creator_id} if context.creator_id else None), "👤 şəxsi çat"
 
+    # ── 📱 Böyük fayllar (Bot API: göndərmə 50 MB, yükləmə 20 MB) userbot / asistan hesabı ilə (Telethon: 2 GB) ──
+    def big_clients() -> list:
+        """[(ad, client)] — əvvəl əsas userbot (1️⃣), sonra canlı yayım asistanı (2️⃣)."""
+        out = []
+        c1 = getattr(context, "telethon_client", None)
+        if c1 is not None:
+            out.append(("1️⃣ userbot", c1))
+        va = getattr(context, "voice_assistant", None)
+        try:
+            c2 = va.any_client() if va is not None else None
+        except Exception:
+            c2 = None
+        if c2 is not None and all(c2 is not c for _, c in out):
+            out.append(("2️⃣ asistan", c2))
+        return out
+
+    async def send_big(path, caption: str, kw: dict, manual: bool):
+        """Faylı userbot / asistan hesabı ilə göndərir. Hədəf = yedək kanalı / qrupu (+ mövzu) və ya sizin şəxsi çat.
+        Uğurda hesabın adını, alınmasa None qaytarır."""
+        errors = []
+        target = kw.get("chat_id")
+        thread = kw.get("message_thread_id")
+        for name, client in big_clients():
+            try:
+                if not client.is_connected():
+                    continue
+                ent_candidates = [target]
+                if target == context.creator_id:
+                    ent_candidates.append("me")                    # öz hesabınızdırsa — Saved Messages
+                for ent in ent_candidates:
+                    try:
+                        await client.send_file(ent, str(path), caption=caption, parse_mode="html",
+                                               silent=not manual, reply_to=thread or None, force_document=True)
+                        return name + ("" if ent == target else " → Saved Messages")
+                    except Exception as e:
+                        errors.append(f"{name}: {str(e)[:60]}")
+            except Exception as e:
+                errors.append(f"{name}: {str(e)[:60]}")
+        logger.info(f"💾 Böyük yedək userbotla göndərilmədi: {'; '.join(errors) or 'hesab yoxdur'}")
+        return None
+
+    async def download_big(doc, message, dst) -> bool:
+        """Bot API-nin yükləyə bilmədiyi (>20 MB) faylı: sizin userbot hesabı bot çatından yükləyir."""
+        c1 = getattr(context, "telethon_client", None)
+        if c1 is None or not c1.is_connected():
+            return False
+        try:
+            me = await bot.me()
+            async for m in c1.iter_messages(me.username, limit=30):
+                f = getattr(m, "file", None)
+                if f is not None and getattr(m, "document", None) and f.size == doc.file_size \
+                        and (f.name or "") == (doc.file_name or ""):
+                    await c1.download_media(m, file=str(dst))
+                    return Path(dst).exists()
+        except Exception as e:
+            logger.info(f"💾 Böyük fayl userbotla yüklənmədi: {e}")
+        return False
+
     async def send_snap(snap, kw, title, manual, note) -> str:
         icon = "🤖" if snap.kind == KIND else "📱"
         if not kw:
             return f"{icon} ⚠️ yalnız lokal — CREATOR_ID və kanal yoxdur"
         if snap.size > SEND_LIMIT:
-            return f"{icon} ⚠️ {bk.human(snap.size)} > 50 MB — yalnız lokal: {snap.name}"
+            via = await send_big(snap.path, bk.caption(snap, note), kw, manual)
+            if via:
+                return f"{icon} {bk.human(snap.size)} ({via})"
+            return f"{icon} ⚠️ {bk.human(snap.size)} > 50 MB — userbot da göndərə bilmədi, yalnız lokal: {snap.name}"
         try:
             await bot.send_document(document=FSInputFile(str(snap.path), filename=snap.name),
                                     caption=bk.caption(snap, note), parse_mode="HTML",
@@ -512,7 +573,12 @@ def setup(context):
                 await cb.answer("📤 Göndərilir...")
                 try:
                     if p.stat().st_size > SEND_LIMIT:
-                        raise RuntimeError("50 MB-dan böyükdür")
+                        via = await send_big(p, f"🗂 Lokal yedək: <code>{escape(p.name)}</code>",
+                                             {"chat_id": cb.message.chat.id}, True)
+                        if not via:
+                            raise RuntimeError("50 MB-dan böyükdür və userbot göndərə bilmədi")
+                        await show(cb, *list_view(f"📤 Göndərildi ({via})"))
+                        return
                     await bot.send_document(cb.message.chat.id, FSInputFile(str(p), filename=p.name),
                                             caption=f"🗂 Lokal yedək: <code>{escape(p.name)}</code>", parse_mode="HTML")
                 except Exception as e:
@@ -629,17 +695,24 @@ def setup(context):
     @dp.message(F.chat.type == "private", waiting_file)
     async def import_file(message: types.Message):
         doc = message.document
-        if (doc.file_size or 0) > DOWNLOAD_LIMIT:
+        big = (doc.file_size or 0) > DOWNLOAD_LIMIT
+        if big and not getattr(context, "telethon_client", None):
             await message.reply(f"❌ Fayl {bk.human(doc.file_size)} — Bot API {bk.human(DOWNLOAD_LIMIT)}-dan böyük "
-                                f"faylı yükləyə bilmir.\nFaylı serverdə <code>{escape(str(bk.BACKUP_DIR))}/</code>-a "
-                                "qoy və 🗂 Lokal yedəklər-dən seç.", parse_mode="HTML")
+                                f"faylı yükləyə bilmir, userbot da qoşulu deyil.\nFaylı serverdə "
+                                f"<code>{escape(str(bk.BACKUP_DIR))}/</code>-a qoy və 🗂 Lokal yedəklər-dən seç.",
+                                parse_mode="HTML")
             return
         state.clear()
         bk.BACKUP_DIR.mkdir(parents=True, exist_ok=True)
         tmp = bk.BACKUP_DIR / f".import_{int(time.time())}_{doc.file_unique_id}"
-        status = await message.reply("⏳ <i>Yüklənir və yoxlanılır...</i>", parse_mode="HTML")
+        status = await message.reply("⏳ <i>Yüklənir və yoxlanılır...</i>" if not big else
+                                     "⏳ <i>Böyük fayl — userbot hesabı ilə yüklənir...</i>", parse_mode="HTML")
         try:
-            await bot.download(doc, destination=tmp)
+            if big:
+                if not await download_big(doc, message, tmp):
+                    raise RuntimeError("userbot faylı bot çatında tapa bilmədi (userbot sizin hesabınız olmalıdır)")
+            else:
+                await bot.download(doc, destination=tmp)
         except Exception as e:
             bk.cleanup(tmp)
             await status.edit_text(f"❌ Fayl yüklənmədi: <code>{escape(str(e))[:200]}</code>", parse_mode="HTML")

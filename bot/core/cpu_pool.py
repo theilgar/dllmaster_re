@@ -789,14 +789,44 @@ class ProcPool:
                 "waiting": self.waiting, "pids": [w.proc.pid for w in alive], **self.stats}
 
 
+class RemoteProcPool(ProcPool):
+    """🌐 Eyni protokol, amma işçi uzaq serverdə (ssh) işləyir — bot/core/remote.py. Avto-miqyasa tabe deyil."""
+
+    async def _spawn(self) -> _Worker:
+        from bot.core import remote
+        try:
+            await remote.ensure_synced()
+            proc = await asyncio.create_subprocess_exec(
+                *remote.worker_argv(nice()), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                stderr=None, limit=64 * 1024 * 1024)
+        except (remote.RemoteUnavailable, OSError) as e:
+            raise WorkerCrashed(f"uzaq server: {e}")
+        w = _Worker(proc)
+        try:
+            hello = await asyncio.wait_for(w._recv(), 60)
+            if hello[2] != "ready":
+                raise RuntimeError(hello)
+        except Exception as e:
+            w.kill()
+            raise WorkerCrashed(f"uzaq işçi başlamadı: {type(e).__name__}: {e}")
+        self.stats["spawned"] += 1
+        return w
+
+    def set_max(self, v: int):
+        self.max_size = self.size = v
+        self.kick()
+
+
 LANES = {
     "user": ProcPool("user", "👤 İstifadəçi", user_procs()),
     "depo": ProcPool("depo", "📦 Depo", depo_procs()),
 }
+REMOTE = RemoteProcPool("remote", "🌐 Uzaq yükləmə", 2)         # yt-dlp serverdə (ölçü: remote:procs)
+REMOTE_UP = RemoteProcPool("remote_up", "🌐 Uzaq upload", 2)    # serverdən Telegram-a upload
 
 
 async def shutdown_pools():
-    for p in LANES.values():
+    for p in (*LANES.values(), REMOTE, REMOTE_UP):
         await p.shutdown()
 
 
@@ -827,7 +857,20 @@ def _lane() -> str:
 
 
 async def _run(name: str, args: tuple, timeout: float, cancel_event=None, cancel_path=None):
-    from bot.core import ytdl_worker
+    from bot.core import remote, ytdl_worker
+    if name == "ytdl_download" and remote.download_on():
+        try:
+            return await remote.download(args, timeout, cancel_event, cancel_path, _lane())
+        except remote.RemoteLocalOnly as e:
+            logger.debug(f"🌐 Bu yükləmə evdə: {e}")
+        except remote.RemoteUnavailable as e:
+            if _STOPPING:
+                raise asyncio.CancelledError("bot dayanır") from e
+            remote.stats["fallback"] += 1
+            if not remote.down_info()[0]:                 # server işləyir, amma bu iş alınmadı — bir dəfəlik fallback
+                logger.warning(f"🌐 Uzaq yükləmə alınmadı: {e} — evdə yüklənir")
+            else:
+                logger.info("🌐 Server dayanıb — evdə yüklənir")
     if mode() == "process":
         pool = LANES[_lane()]
         try:

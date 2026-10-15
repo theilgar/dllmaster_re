@@ -356,6 +356,9 @@ async def perf_value_input(message: Message):
     from bot.core import cpu_pool as cp
 
     key = perf_inp.get("key")
+    if isinstance(key, str) and key.startswith("rmt_"):
+        await _remote_value_input(message, ctx, key[4:])
+        return
     cfg = PERF_PICK_CONFIG.get(key)
     if not cfg:
         perf_inp["stage"] = None
@@ -399,6 +402,26 @@ async def perf_value_input(message: Message):
     text, kb = perf_picker_view(key, note)
     with contextlib.suppress(Exception):
         await ctx.bot.edit_message_text(text=text, reply_markup=kb, **panel_args)
+
+
+async def _remote_value_input(message: Message, ctx, what: str):
+    """🌐 Uzaq server: ünvan / port / açar mətn daxiletməsi."""
+    from bot.core import remote
+    from bot.menus.views.performance import remote_view
+
+    raw = (message.text or "").strip()
+    with contextlib.suppress(Exception):
+        await message.delete()
+    try:
+        remote.set_value(what, "" if raw == "-" else raw)
+        note = "✅ Yadda saxlanıldı"
+    except ValueError as e:
+        note = f"⚠️ {escape(str(e))}"
+    perf_inp["stage"] = None
+    text, kb = remote_view(note)
+    with contextlib.suppress(Exception):
+        await ctx.bot.edit_message_text(text=text, reply_markup=kb, chat_id=perf_inp["chat_id"],
+                                        message_id=perf_inp["panel_id"], parse_mode="HTML")
 
 
 # ── 🎙 8. REC hədəf daxil edilməsi ──

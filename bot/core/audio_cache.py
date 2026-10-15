@@ -458,7 +458,29 @@ def cached_ids(video_ids) -> set:
 async def upload_to_depo(bot, file_path, filename: str, title: str, performer: str,
                          duration: int, url: str, video_id: str, thumb: bytes = None, yt_title: str = None,
                          source: str = "ytm"):
-    """Faylı (yol və ya bytes) mənbəyə uyğun depo kanalına yükləyir, keşə yazır və file_id qaytarır. Alınmasa None."""
+    """Faylı (yol və ya bytes) mənbəyə uyğun depo kanalına yükləyir, keşə yazır və file_id qaytarır. Alınmasa None.
+    🌐 Fayl hələ uzaq serverdədirsə (remote.PENDING) upload serverdən gedir; alınmasa fayl evə çəkilir."""
+    from bot.core import remote
+    on_remote = remote.pending(file_path)
+    try:
+        res = await _upload_to_depo(bot, file_path, filename, title, performer, duration, url, video_id, thumb,
+                                    yt_title, source)
+    except BaseException:
+        if on_remote:
+            asyncio.ensure_future(remote.discard(file_path))      # çağıran yenidən cəhd edəcək — serverdə nüsxə lazım deyil
+        raise
+    if on_remote and remote.pending(file_path):
+        if res:
+            await remote.discard(file_path)                      # göndərildi — serverdəki nüsxə silinir
+        else:
+            await remote.materialize(file_path)                  # alınmadı — çağıranın FSInputFile(path) fallback-ı işləsin
+    return res
+
+
+async def _upload_to_depo(bot, file_path, filename: str, title: str, performer: str,
+                          duration: int, url: str, video_id: str, thumb: bytes = None, yt_title: str = None,
+                          source: str = "ytm"):
+    from bot.core import remote
     chat_id, thread_id = await depo_target_chat_info(bot, source=source)
     if not chat_id:
         return None
@@ -492,7 +514,19 @@ async def upload_to_depo(bot, file_path, filename: str, title: str, performer: s
                 }
                 if thread_id:
                     send_kw["message_thread_id"] = thread_id
-                msg = await bot.send_audio(**send_kw)
+                msg = None
+                if remote.pending(file_path) and remote.upload_on():
+                    try:                                         # 🌐 server → Telegram (ev bandwidth-i işləmir)
+                        msg = await remote.upload_audio(file_path, bot.token, chat_id, thread_id, filename, title,
+                                                        performer, duration, caption, thumb)
+                    except remote.RemoteUploadError as e:
+                        raise RuntimeError(str(e))               # Telegram cavabı (flood / icazə) — aşağıdakı məntiq işləsin
+                    except remote.RemoteUnavailable as e:
+                        logger.info(f"🌐 Uzaq upload alınmadı ({e}) — fayl evə çəkilir")
+                if msg is None:
+                    if not await remote.materialize(file_path):
+                        return None
+                    msg = await bot.send_audio(**send_kw)
                 # keşə yazma göndərmə ilə bir yerdədir: restart / ləğv arada olsa belə post bazaya düşür
                 return await asyncio.to_thread(save_from_message, video_id, msg, title, performer, duration,
                                                yt_title=yt_title)

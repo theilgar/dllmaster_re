@@ -152,7 +152,78 @@ def ytm_search(query: str, limit: int, proxy: str = None):
     return _ytm.search(query, filter="songs", limit=limit)
 
 
-TASKS = {"ping": ping, "ytdl_extract": ytdl_extract, "ytdl_download": ytdl_download, "ytm_search": ytm_search}
+def upload_audio(token: str, chat_id: int, thread_id, path: str, filename: str, title: str, performer: str,
+                 duration: int, caption: str, thumb: bytes = None):
+    """🌐 Uzaq server: faylı birbaşa Telegram-a yükləyir (ev serveri fayla toxunmur).
+    → göndərilən mesaj (dict, aiogram Message.model_dump). Telegram xətası olduğu kimi atılır (flood mətni qalır)."""
+    import asyncio
+    from aiogram import Bot
+    from aiogram.types import BufferedInputFile, FSInputFile
+
+    async def go():
+        bot = Bot(token=token)
+        try:
+            kw = {"chat_id": chat_id, "audio": FSInputFile(path, filename=filename),
+                  "title": (title or "")[:64] or None, "performer": (performer or "")[:64] or None,
+                  "duration": int(duration or 0) or None, "caption": caption, "parse_mode": "HTML",
+                  "disable_notification": True,
+                  "thumbnail": BufferedInputFile(thumb, filename="cover.jpg") if thumb else None}
+            if thread_id:
+                kw["message_thread_id"] = thread_id
+            msg = await bot.send_audio(**kw)
+            return msg.model_dump(mode="json", exclude_none=True)
+        finally:
+            await bot.session.close()
+
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"uzaq fayl tapılmadı: {path}")
+    return asyncio.run(go())
+
+
+def file_stat(path: str):
+    return os.path.getsize(path) if os.path.exists(path) else -1
+
+
+def cleanup_old(max_age: int = 6 * 3600):
+    """Uzaq iş qovluğunda (dl/) qalmış köhnə fayllar (ev botu çöksə / dublikat atılsa) silinir."""
+    import time
+    n, now = 0, time.time()
+    for d in ("dl",):
+        if not os.path.isdir(d):
+            continue
+        for name in os.listdir(d):
+            f = os.path.join(d, name)
+            try:
+                if os.path.isfile(f) and now - os.path.getmtime(f) > max_age:
+                    os.remove(f)
+                    n += 1
+            except OSError:
+                pass
+    return n
+
+
+def diag():
+    """Quraşdırma yoxlaması: versiyalar və lazımi alətlər."""
+    import shutil
+    info = {"python": sys.version.split()[0], "ffmpeg": bool(shutil.which("ffmpeg")),
+            "js": [n for n in ("deno", "node", "bun") if shutil.which(n)]}
+    for mod in ("yt_dlp", "aiogram"):
+        try:
+            m = __import__(mod)
+            info[mod] = getattr(getattr(m, "version", m), "__version__", None) or getattr(m, "__version__", "ok")
+        except Exception:
+            info[mod] = None
+    st = os.statvfs(".")
+    info["free_mb"] = st.f_bavail * st.f_frsize // 1048576
+    try:
+        info["ram_mb"] = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") // 1048576
+    except (ValueError, OSError):
+        info["ram_mb"] = None
+    return info
+
+
+TASKS = {"ping": ping, "ytdl_extract": ytdl_extract, "ytdl_download": ytdl_download, "ytm_search": ytm_search,
+         "upload_audio": upload_audio, "file_stat": file_stat, "cleanup_old": cleanup_old, "diag": diag}
 
 
 # ───────────────────────── proses döngüsü ─────────────────────────
@@ -200,9 +271,15 @@ def main():
             # nəticəni qəbul edən yoxdur: səssiz çıx, terminala traceback tökmə
             os._exit(0)
 
+    if os.getenv("DLM_REMOTE_WORKER") == "1":         # 🌐 uzaq server: açılışda köhnə qalıqları təmizlə
+        os.makedirs("dl", exist_ok=True)
+        try:
+            cleanup_old()
+        except Exception:
+            pass
     send((0, "ok", "ready"))
     while True:
-        if os.getppid() == 1:                          # ana proses yoxdur (yetim qalmışıq)
+        if os.getppid() == 1 and os.getenv("DLM_REMOTE_WORKER") != "1":                          # ana proses yoxdur (yetim qalmışıq)
             os._exit(0)
         try:
             size = struct.unpack(">I", _read(proto_in, 4))[0]
