@@ -175,3 +175,24 @@ def same_song(a_artist, a_track, b_artist, b_track) -> bool:
         return False
     aa, ab = artist_tokens(a_artist), artist_tokens(b_artist)
     return bool(aa and ab and (aa & ab))
+
+
+# ── 🎬 musiqi olmayan YouTube nəticələri (xəbər, film fraqmenti, serial, podcast ...) ──
+_NON_MUSIC = ("xəbər", "xeber", "xəbərlər", "haber", "haberler", "son dakika", "news", "magazin", "dedikodu",
+              "fragman", "trailer", "teaser", "full movie", "tam film", "film izle", "filmi izle", "kino", "dizi",
+              "episode", "bölüm", "bolum", "sezon", "serial", "seriya", "podcast", "röportaj", "reportaj",
+              "interview", "müsahibə", "tutorial", "vlog", "gameplay", "walkthrough", "canlı yayın", "live stream",
+              "livestream", "reaction", "review", "обзор", "новости", "сериал", "фильм", "трейлер")
+
+
+def non_music_reason(title: str, duration: int = 0, query: str = "", min_sec: int = 0) -> str:
+    """Nəticə musiqiyə oxşamırsa səbəbi (boş sətir — oxşayır). Açar söz sorğuda özü varsa sayılmır.
+    min_sec > 0 — bundan qısa videolar (fraqment / reklam) da musiqi sayılmır."""
+    low = (title or "").lower()
+    q = (query or "").lower()
+    for w in _NON_MUSIC:
+        if w in low and w not in q:
+            return w
+    if min_sec and duration and 0 < int(duration) < min_sec:
+        return f"{int(duration)} san."
+    return ""

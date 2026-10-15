@@ -64,3 +64,10 @@ def test_too_large_stops_after_first_attempt(monkeypatch, tmp_path):
     with pytest.raises(RuntimeError, match="limitindən"):
         asyncio.run(yh.download_as_m4a("https://www.youtube.com/watch?v=aaaaaaaaaaa", "x", "firefox"))
     assert len(calls) == 1
+
+
+def test_rank_setting_defaults_and_fmt():
+    from bot.core import inline_settings as IS
+    assert IS.SPEC["rank"][1] == 1 and IS.SPEC["chat_rank"][1] == 1
+    assert "rank" in IS.INLINE_ORDER and "chat_rank" in IS.CHAT_ORDER
+    assert IS.fmt("rank").startswith(("🤖", "📦"))

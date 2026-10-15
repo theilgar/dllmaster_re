@@ -328,7 +328,20 @@ def setup(context):
                 in_depo.append(r)
             else:
                 rest.append(r)
-        return top + in_depo + rest
+        merged = top + in_depo + rest
+        # musiqiyə oxşamayan (xəbər, fraqment, serial ...) nəticələr siyahının sonuna
+        nm = [r for r in merged if not r.get("depo") and song_names.non_music_reason(
+            r.get("original_title") or r.get("title") or "", int(r.get("raw_duration") or 0), query)]
+        if nm:
+            merged = [r for r in merged if r not in nm] + nm
+        if IS.get("chat_rank"):                       # 🤖 Avto: soruşulan mahnı (ən yüksək uyğunluq) önə
+            def score(i_r):
+                i, r = i_r
+                artist, track = parse_title(r.get("original_title") or r.get("title") or "")
+                sc = song_names.query_score(query, artist or "", track or r.get("title") or "")
+                return -((sc + (0.01 if r.get("depo") else 0)) - 0.01 * i - (1.0 if any(r is x for x in nm) else 0))
+            merged = [r for _, r in sorted(enumerate(merged), key=lambda ir: (score(ir), ir[0]))]
+        return merged
 
     # ═════════════ ♾ Sonsuz səhifələmə (axtarış və /mix üçün ortaq) ═════════════
     def _rkey(r: dict):
@@ -1377,6 +1390,10 @@ def setup(context):
             seen.add(vid)
             if (r.get('raw_duration') or 0) > BATCH_MAX_DURATION:
                 skipped += 1
+                continue
+            if song_names.non_music_reason(r.get('original_title') or r.get('title') or "", r.get('raw_duration') or 0,
+                                           user_data.get('query') or "", min_sec=60):
+                skipped += 1                       # xəbər, film fraqmenti, serial ... "Hamısını yüklə"-yə düşməsin
                 continue
             items.append(r)
         if not items:

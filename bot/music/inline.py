@@ -28,7 +28,7 @@ from aiogram.types import (
 
 from common.delivery import is_audio_forbidden_error
 
-from bot.core import audio_cache, inline_settings as IS, youtube_handler as yt_handler
+from bot.core import audio_cache, inline_settings as IS, song_names, youtube_handler as yt_handler
 from bot.core.youtube_handler import DownloadCancelled
 from common import activity
 from common.i18n import _ as tr
@@ -75,6 +75,9 @@ mix_stats = {
     "total": 0.0,
     "answered": 0,
 }
+
+
+IS.set_stats_provider(lambda: {"inline": inline_stats, "chat": chat_stats, "mix": mix_stats})   # 🤖 Avto ayarlar
 
 
 def norm_query(t: str) -> str:
@@ -344,7 +347,10 @@ def register_inline_system(
         is_mp3_tester = bool(mp3_hook and mp3_hook.is_active_for(q.from_user.id))
         tester_br = mp3_hook.get_bitrate(user_id=q.from_user.id) if is_mp3_tester else None
 
-        depo_cards, depo_vids = [], set()
+        # sorğuya həqiqətən uyğun olmayan depo nəticələri (trigram / ILIKE təsadüfləri) önə çıxmasın
+        auto_rank = bool(IS.get("rank"))            # 🤖 Avto: soruşulan mahnı uyğunluğa görə önə; 📦: depo həmişə yuxarıda
+        hits = [h for h in hits if not auto_rank or song_names.query_score(text, h.get("performer") or "", h.get("title") or "") >= 0.7]
+        depo_cards, depo_vids, depo_scores = [], set(), []
         for h in hits:
             depo_vids.add(h["video_id"])
             dur_sec = int(h.get("duration", 0) or 0)
@@ -362,6 +368,7 @@ def register_inline_system(
             art = make_article(h_art, in_depo=True, mp3_bitrate=tester_br)
             if art:
                 depo_cards.append(art)
+                depo_scores.append(song_names.query_score(text, performer, track) + 0.01)   # yalnız tam bərabərlikdə depo üstün
         yt = [r for r in (results or [])[: IS.get("limit")] if video_id_from_url_fn(r.get("url")) not in depo_vids]
         cached = await asyncio.to_thread(audio_cache.cached_ids, [video_id_from_url_fn(r.get("url")) for r in yt])
         named = await asyncio.to_thread(name_hits_fn, yt, cached)
@@ -376,25 +383,30 @@ def register_inline_system(
                 r = dict(r)
                 mark_named_fn(r, named[v])
             yt2.append(r)
-        articles = depo_cards + [
-            a
-            for a in (
-                make_article(
-                    r,
-                    video_id_from_url_fn(r.get("url")) in cached or r.get("depo"),
-                    mp3_bitrate=tester_br,
-                )
-                for r in yt2
-            )
-            if a
-        ]
+        scored = list(zip(depo_scores, depo_cards))
+        for rank, r in enumerate(yt2):
+            a = make_article(r, video_id_from_url_fn(r.get("url")) in cached or r.get("depo"), mp3_bitrate=tester_br)
+            if not a:
+                continue
+            artist, track = parse_title_fn(r.get("original_title") or r.get("title") or "")
+            sc = song_names.query_score(text, artist or "", track or r.get("title") or "")
+            if r.get("depo"):
+                sc += 0.01
+            elif song_names.non_music_reason(r.get("original_title") or r.get("title") or "",
+                                              int(r.get("raw_duration") or 0), text):
+                sc -= 1.0                       # xəbər, film fraqmenti, serial ... — siyahının sonuna
+            scored.append((sc - 0.01 * rank, a))
+        # soruşulan mahnı (ən yüksək uyğunluq) önə; bərabər uyğunluqda əvvəlki sıra saxlanır
+        if auto_rank:
+            scored.sort(key=lambda x: -x[0])
+        articles = [a for _, a in scored]
 
         if not articles and results is None:
             return
         try:
             await q.answer(
                 articles[:50],
-                cache_time=1 if results is None else 180,
+                cache_time=1 if results is None else 20,
                 is_personal=bool(depo_cards) or results is None or is_mp3_tester,
             )
             took = time.monotonic() - t_start

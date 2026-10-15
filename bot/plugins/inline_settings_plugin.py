@@ -101,7 +101,9 @@ def setup(context):
         rows = []
         for name in names:
             cb_data = f"is:t:{name}" if name in IS.TOGGLES else f"is:pick:{name}"
-            rows.append([btn(f"{IS.TITLES[name]}: {IS.fmt(name)}", cb_data)])
+            auto = IS.is_auto(name)
+            rows.append([btn(f"{IS.TITLES[name]}: {IS.fmt(name)}", cb_data),
+                         btn("🤖✅" if auto else "🤖", f"is:a:{name}")])
         return rows
 
     def inline_picker_view(name: str, note: str = ""):
@@ -143,7 +145,9 @@ def setup(context):
                   "<i>Dəyişiklik dərhal tətbiq olunur. ✏️ — defoltdan fərqli. Inline və /music eyni keşi işlədir.</i>"]
         if note:
             lines.append(f"\n{note}")
-        rows = [[btn("— 🔎 Inline —", "is:noop")], *rows_for(IS.INLINE_ORDER),
+        all_auto = all(IS.is_auto(n) for n in IS.SPEC)
+        rows = [[btn("✋ Hamısı Manual" if all_auto else "🤖 Hamısı Avto", f"is:aa:{0 if all_auto else 1}")],
+                [btn("— 🔎 Inline —", "is:noop")], *rows_for(IS.INLINE_ORDER),
                 [btn("— 🎵 /music —", "is:noop")], *rows_for(IS.CHAT_ORDER),
                 [btn("— 🔀 Mix —", "is:noop")], *rows_for(IS.MIX_ORDER),
                 [btn("— 🧩 Ümumi —", "is:noop")], *rows_for(IS.SHARED_ORDER)]
@@ -222,6 +226,13 @@ def setup(context):
         elif act == "t" and len(parts) > 2 and parts[2] in IS.TOGGLES:
             IS.toggle(parts[2])
             await cb.answer(f"{IS.TITLES[parts[2]]}: {IS.fmt(parts[2])}")
+        elif act == "a" and len(parts) > 2 and parts[2] in IS.SPEC:
+            name = parts[2]
+            IS.set_auto(name, not IS.is_auto(name))
+            await cb.answer(f"{IS.TITLES[name]}: " + ("🤖 Avto" if IS.is_auto(name) else "✋ Manual"))
+        elif act == "aa" and len(parts) > 2 and parts[2] in ("0", "1"):
+            IS.set_all_auto(parts[2] == "1")
+            await cb.answer("🤖 Bütün ayarlar Avto" if parts[2] == "1" else "✋ Bütün ayarlar Manual")
         elif act == "clear":
             n = context.inline_cache_clear() if hasattr(context, "inline_cache_clear") else 0
             await cb.answer(f"🗑 {n} sorğu keşdən silindi")
