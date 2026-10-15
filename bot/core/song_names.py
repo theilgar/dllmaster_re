@@ -141,16 +141,39 @@ def _tok_hit(q: str, pool: set) -> bool:
     return q in pool or (len(q) >= 3 and any(p.startswith(q) for p in pool))
 
 
+def _ordered(s: str) -> list:
+    return [w for w in re.findall(r"\w+", fold(s)) if w not in _STOP and (len(w) >= 2 or w.isdigit())]
+
+
+def _glued(words: list) -> set:
+    """Yan-yana sözlərin birləşməsi: ["med","cezir"] → {"medcezir"} (sorğuda "medcezir", adda "Med Cezir")."""
+    out = set()
+    for i in range(len(words) - 1):
+        out.add(words[i] + words[i + 1])
+        if i + 2 < len(words):
+            out.add(words[i] + words[i + 1] + words[i + 2])
+    return out
+
+
 def query_score(query: str, artist: str, track: str) -> float:
-    """Axtarış sorğusu depo mahnısına nə qədər uyğundur (0..1). Sözün əvvəli də sayılır: "lose yours"."""
-    q = tokens(query)
+    """Axtarış sorğusu depo mahnısına nə qədər uyğundur (0..1). Sözün əvvəli də sayılır: "lose yours".
+    Bitişik / ayrı yazılış eyni sayılır: "medcezir" ≡ "Med Cezir"."""
+    qw = _ordered(query)
+    q = set(qw)
     if not q:
         return 0.0
-    ta, tt = tokens(artist), tokens(track)
-    pool = ta | tt
-    hit = sum(1 for w in q if _tok_hit(w, pool))
-    score = hit / len(q)
-    if tt and not any(_tok_hit(w, tt) for w in q):
+    aw, tw = _ordered(artist), _ordered(track)
+    ta, tt = set(aw), set(tw)
+    tt_ext = tt | _glued(tw)                          # adın birləşmiş formaları
+    pool = ta | tt | _glued(aw) | _glued(tw) | _glued(aw + tw)
+    hit_words = {w for w in q if _tok_hit(w, pool)}
+    # sorğudakı yan-yana iki söz adda birləşik yazılıbdırsa ("med cezir" ↔ "Medcezir") — hər ikisi sayılır
+    for i in range(len(qw) - 1):
+        if qw[i] + qw[i + 1] in pool:
+            hit_words |= {qw[i], qw[i + 1]}
+    score = len(hit_words) / len(q)
+    if tt and not any(_tok_hit(w, tt_ext) for w in q) and not any(
+            qw[i] + qw[i + 1] in tt_ext for i in range(len(qw) - 1)):
         score *= 0.5                                  # yalnız artist uyğun gəlir — ifaçının başqa mahnısı
     extra = len(tt - q) / max(1, len(tt))             # sorğuda olmayan çox söz → bir az aşağı
     return score - 0.15 * extra

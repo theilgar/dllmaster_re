@@ -11,7 +11,7 @@ from aiogram import F, Router
 from aiogram.types import CallbackQuery, Message
 
 from bot.menus.state import get_context, is_creator, mt as mt_state, panel_editor, reset_inputs, safe_edit_cb
-from bot.menus.views.maintenance import ask_text_view, maint_view
+from bot.menus.views.maintenance import ask_text_view, maint_view, tests_view
 from common import maintenance
 
 logger = logging.getLogger(__name__)
@@ -96,6 +96,37 @@ async def _mcb_maint(cb: CallbackQuery, parts: list, action: str):
         api = getattr(ctx, "maintenance", None)
         n = await api.stop_voice() if api else 0
         note = f"⏹ {n} yayım dayandırıldı"
+    elif sub == "tests":
+        await cb.answer()
+        await safe_edit_cb(cb, *tests_view())
+        return
+    elif sub == "tr":                                      # menu:maint:tr:<test|all|sim>
+        which = parts[3] if len(parts) > 3 else "all"
+        from bot.core import selftest
+        if which == "sim":                                 # «Adminə bildir» sınağı: saxta istifadəçi xətası
+            from bot.plugins.report_plugin import with_report
+            await cb.answer("🚨 Saxta xəta göndərildi")
+            with contextlib.suppress(Exception):
+                await ctx.bot.send_message(
+                    cb.from_user.id,
+                    "❌ <b>Xəta:</b> <code>TEST — bu saxta xətadır (texniki iş rejimi → Testlər)</code>\n"
+                    "<i>Aşağıdakı düyməyə basın: bot sahibinə (sizə) bildiriş gəlməlidir.</i>",
+                    parse_mode="HTML", reply_markup=with_report(None))
+            return
+        keys = selftest.ORDER if which == "all" else ([which] if which in selftest.TESTS else [])
+        if not keys:
+            await cb.answer()
+            return
+        await cb.answer("🧪 Test gedir...")
+
+        async def progress(done, current):
+            with contextlib.suppress(Exception):
+                await safe_edit_cb(cb, *tests_view(done, running=current))
+
+        results = await selftest.run(ctx, keys, progress)
+        bad = [r for r in results if not r["ok"]]
+        await safe_edit_cb(cb, *tests_view(results, note=("❌ Problem tapıldı — loqa baxın" if bad else "")))
+        return
     elif sub == "textdef":
         maintenance.set_option(maintenance.K_TEXT, None)
         note = "♻️ Standart mətn bərpa olundu"

@@ -87,8 +87,31 @@ def maint_view(note: str = "") -> tuple[str, InlineKeyboardMarkup]:
     ]
     if s["text"]:
         rows.append([panel.btn("♻️ Standart mətn", "menu:maint:textdef")])
+    rows.append([panel.btn("🧪 Testlər (real yoxlama)", "menu:maint:tests")])
     rows.append(nav_row("dev", refresh="maint"))
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def tests_view(results: list | None = None, running: str = "", note: str = "") -> tuple[str, InlineKeyboardMarkup]:
+    from bot.core import selftest
+    lines = [crumb(SECTIONS["sys"], "🛠 Texniki iş rejimi", "🧪 Testlər"), LINE,
+             "Botun <b>real</b> işlək olduğunu yoxlayır: axtarış, YouTube, qısa video yükləmə, PO token / cookie, "
+             "depo, baza, ffmpeg, Shazam və texniki iş qapısı. Heç nə dəyişmir.", ""]
+    if results:
+        lines.append(selftest.render(results, running))
+    elif running:
+        lines.append(f"⏳ <b>{selftest.TESTS[running][0]}</b> ...")
+    else:
+        lines.append("<i>Test seç və ya hamısını işlət.</i>")
+    if note:
+        lines.append(f"\nℹ️ {note}")
+    rows = [[panel.btn("▶️ Hamısını işlət", "menu:maint:tr:all")]]
+    keys = selftest.ORDER
+    for i in range(0, len(keys), 2):
+        rows.append([panel.btn(selftest.TESTS[k][0][:30], f"menu:maint:tr:{k}") for k in keys[i:i + 2]])
+    rows.append([panel.btn("🚨 «Adminə bildir» sınağı (saxta xəta)", "menu:maint:tr:sim")])
+    rows.append(nav_row("maint", refresh="maint:tests"))
+    return "\n".join(lines)[:4000], InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def ask_text_view(note: str = "") -> tuple[str, InlineKeyboardMarkup]:
@@ -107,4 +130,4 @@ def ask_text_view(note: str = "") -> tuple[str, InlineKeyboardMarkup]:
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=[nav_row("maint")])
 
 
-__all__ = ["ask_text_view", "escape", "maint_view"]
+__all__ = ["ask_text_view", "escape", "maint_view", "tests_view"]

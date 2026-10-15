@@ -12,3 +12,9 @@ def test_songs_pass_and_query_words_respected():
     assert not sn.non_music_reason("Kino - Gruppa Krovi", 280, "kino gruppa krovi")   # sorğuda özü var
     assert sn.non_music_reason("Reklam", 20, "", min_sec=60)
     assert not sn.non_music_reason("Qısa mahnı", 20, "")
+
+
+def test_glued_and_split_spelling_match():
+    assert sn.query_score("ceza medcezir", "Ceza", "Med Cezir") >= 0.85
+    assert sn.query_score("ceza med cezir", "Ceza", "Medcezir") >= 0.85
+    assert sn.query_score("ceza medcezir", "Ceza", "Suspus") < 0.5       # ifaçının başqa mahnısı

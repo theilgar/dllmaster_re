@@ -661,7 +661,7 @@ def _build_attempts(kind: str = "download") -> list:
     return good + bad
 
 
-async def download_as_m4a(url: str, base_name: str, browser: str, cancel_event=None) -> str:
+async def download_as_m4a(url: str, base_name: str, browser: str, cancel_event=None, on_progress=None) -> str:
     """Videonu yükləyir (mümkün olarsa yalnız audio axını, yoxdursa video) və m4a-ya çevirir.
 
     YouTube tərəfi tez-tez "page needs to be reloaded" / "format not available" verir,
@@ -714,7 +714,6 @@ async def download_as_m4a(url: str, base_name: str, browser: str, cancel_event=N
             'max_filesize': MAX_DOWNLOAD_BYTES,
             'retries': 3,
             'fragment_retries': 5,
-            'sleep_interval_requests': 1,    # sorğular arası pauza — rate-limit-i yumşaldır
             'quiet': True,
             # ua_opts() BURADA YOXDUR: googlevideo URL-ləri klientin öz UA-sına bağlıdır,
             # təsadüfi masaüstü UA (xüsusən tv / android_vr ilə) 403 verir. yt-dlp UA-nı özü seçir.
@@ -723,6 +722,9 @@ async def download_as_m4a(url: str, base_name: str, browser: str, cancel_event=N
         if parallel_on:
             ydl_opts['concurrent_fragment_downloads'] = 4
             ydl_opts['http_chunk_size'] = 10485760
+        if kind == "depo":
+            ydl_opts['sleep_interval_requests'] = 1          # 📦 depo: sorğular arası pauza — rate-limit-i yumşaldır
+                                                              # (👤 istifadəçi yükləməsi gözləmir — hər sorğuda +1 san. itirirdi)
         if kind == "depo" and DEPO_SLEEP > 0:
             ydl_opts['sleep_interval'] = DEPO_SLEEP              # 📦 depo: yükləmələr arası təsadüfi fasilə
             ydl_opts['max_sleep_interval'] = DEPO_SLEEP * 2
@@ -736,7 +738,7 @@ async def download_as_m4a(url: str, base_name: str, browser: str, cancel_event=N
         try:
             logger.info(f"Yükləmə cəhdi: {label}" + (f" · 🔑 {acc['name']}" if use_cookies and acc else "")
                         + (f" · 🌐 {px.mask(proxy_url)}" if proxy_url else ""))
-            res = await cpu_pool.ytdl_download(url, ydl_opts, cancel_event)
+            res = await cpu_pool.ytdl_download(url, ydl_opts, cancel_event, on_progress=on_progress)
             info = res["info"]
             remember_meta(info)
             src_path = res["path"]
@@ -1147,11 +1149,11 @@ class YoutubeManager:
                 break
         return results
 
-    async def download_track(self, query: str, base_name: str, cancel_event=None) -> str:
+    async def download_track(self, query: str, base_name: str, cancel_event=None, on_progress=None) -> str:
         try:
             return await download_as_m4a(
                 query, base_name, self.browser,
-                cancel_event=cancel_event,
+                cancel_event=cancel_event, on_progress=on_progress,
             )
         except DownloadCancelled:
             raise

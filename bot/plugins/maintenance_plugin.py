@@ -45,7 +45,7 @@ PRIORITY = 2                                   # digər plugin-lərdən əvvəl 
 
 VOICE_COMMANDS = {"play", "p", "oynat", "mixplay", "mp", "radio"}      # qrupda səsli yayımı başladan əmrlər
 ALLOWED_COMMANDS = {"start", "help", "lang", "language", "dil", "premium"}
-ALLOWED_CB_PREFIXES = ("ln:", "lang:", "buy:", "tip:", "tip_prompt:", "sg:", "start:")
+ALLOWED_CB_PREFIXES = ("ln:", "lang:", "buy:", "tip:", "tip_prompt:", "sg:", "start:", "rp:")   # rp: — «Adminə bildir»
 NOTICE_COOLDOWN = 120.0
 NOTIFY_DELAY = 0.05                            # ~20 mesaj/san
 WATCH_EVERY = 15

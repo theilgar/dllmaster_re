@@ -846,8 +846,46 @@ async def ytdl_extract(url: str, opts: dict, timeout: float = EXTRACT_TIMEOUT):
     return await _run("ytdl_extract", (url, opts), timeout)
 
 
-async def ytdl_download(url: str, opts: dict, cancel_event=None, timeout: float = DOWNLOAD_TIMEOUT) -> dict:
-    """→ {"path", "info"}. ⏹ — cancel_event; proses / thread fərqi yoxdur (fayl bayrağı ilə)."""
+async def _poll_progress(path: str, on_progress):
+    """İşçinin yazdığı irəliləyiş faylını (JSON) oxuyub on_progress(dict) çağırır (hər ~1 san.)."""
+    import json
+    last = None
+    while True:
+        await asyncio.sleep(0.4)
+        try:
+            with open(path, encoding="utf-8") as f:
+                d = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if d != last:
+            last = d
+            try:
+                res = on_progress(d)
+                if asyncio.iscoroutine(res):
+                    await res
+            except Exception as e:
+                logger.debug(f"on_progress xətası: {e!r}")
+
+
+async def _final_progress(path: str, on_progress):
+    import json
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return
+    try:
+        res = on_progress(d)
+        if asyncio.iscoroutine(res):
+            await res
+    except Exception as e:
+        logger.debug(f"on_progress (yekun) xətası: {e!r}")
+
+
+async def ytdl_download(url: str, opts: dict, cancel_event=None, timeout: float = DOWNLOAD_TIMEOUT,
+                        on_progress=None) -> dict:
+    """→ {"path", "info"}. ⏹ — cancel_event; proses / thread fərqi yoxdur (fayl bayrağı ilə).
+    on_progress(dict{done,total,speed,eta}) — yükləmə gedərkən canlı irəliləyiş (könüllü)."""
     opts = {k: v for k, v in opts.items() if k not in ("progress_hooks", "logger")}
     os.makedirs(CANCEL_DIR, exist_ok=True)
     cancel_path = os.path.join(CANCEL_DIR, f"{os.getpid()}_{next(_cancel_ids)}")
@@ -860,15 +898,20 @@ async def ytdl_download(url: str, opts: dict, cancel_event=None, timeout: float 
                     return
                 await asyncio.sleep(0.3)
         watcher = asyncio.ensure_future(watch())
+    poller = asyncio.ensure_future(_poll_progress(cancel_path + ".prog", on_progress)) if on_progress else None
     try:
         return await _run("ytdl_download", (url, opts, cancel_path), timeout, cancel_event, cancel_path)
     finally:
         if watcher:
             watcher.cancel()
-        try:
-            os.remove(cancel_path)
-        except OSError:
-            pass
+        if poller:
+            poller.cancel()
+            await _final_progress(cancel_path + ".prog", on_progress)      # son (yekun) dəyər itməsin
+        for pth in (cancel_path, cancel_path + ".prog", cancel_path + ".prog.t"):
+            try:
+                os.remove(pth)
+            except OSError:
+                pass
 
 
 _cancel_ids = itertools.count(1)

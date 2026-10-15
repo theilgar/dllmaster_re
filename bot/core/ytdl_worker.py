@@ -83,9 +83,39 @@ def ytdl_download(url: str, opts: dict, cancel_path: str = None):
     from yt_dlp import YoutubeDL
     from yt_dlp.utils import DownloadCancelled
 
-    def hook(_):
+    prog_path = (cancel_path + ".prog") if cancel_path else None
+    last = [0.0]
+
+    def hook(d):
         if cancel_path and os.path.exists(cancel_path):
             raise DownloadCancelled("İstifadəçi yükləməni dayandırdı")
+        if prog_path and isinstance(d, dict) and d.get("status") == "finished":
+            try:                                          # ✅ yekun: orta sürət (yükləmə müddətinə görə)
+                import json
+                done = d.get("downloaded_bytes") or d.get("total_bytes") or 0
+                el = d.get("elapsed") or 0
+                tmp = prog_path + ".t"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump({"finished": True, "done": done, "total": done, "elapsed": el,
+                               "avg": (done / el) if el else 0}, f)
+                os.replace(tmp, prog_path)
+            except OSError:
+                pass
+        if prog_path and isinstance(d, dict) and d.get("status") == "downloading":
+            import time
+            now = time.monotonic()
+            if now - last[0] >= 0.25:                     # 📶 canlı irəliləyiş: əsas proses bu faylı oxuyur
+                last[0] = now
+                try:
+                    import json
+                    tmp = prog_path + ".t"
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        json.dump({"done": d.get("downloaded_bytes") or 0,
+                                   "total": d.get("total_bytes") or d.get("total_bytes_estimate") or 0,
+                                   "speed": d.get("speed") or 0, "eta": d.get("eta")}, f)
+                    os.replace(tmp, prog_path)
+                except OSError:
+                    pass
 
     opts = _quiet(opts)
     opts["progress_hooks"] = [hook]

@@ -905,6 +905,12 @@ CATALOG = {
 }
 
 
+# əlavə tərcümələr (common/i18n_extra.py) — CATALOG-da olmayanlar qoşulur
+from common.i18n_extra import EXTRA as _EXTRA  # noqa: E402
+for _k, _v in _EXTRA.items():
+    CATALOG.setdefault(_k, _v)
+
+
 # ═════════════════════════ dil faylları: yükləmə / yoxlama / ixrac ═════════════════════════
 def _ph(text: str) -> set:
     return set(re.findall(r"\{(\w+)\}", text or ""))

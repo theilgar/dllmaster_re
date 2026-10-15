@@ -534,7 +534,7 @@ def setup(context):
             await send_temp(
                 message,
                 tr("❌ <b>Xəta:</b> <code>{e}</code>", e=escape(str(e))),
-                seconds=5,
+                seconds=45,                         # «🚨 Adminə bildir» düyməsini basmağa vaxt qalsın
                 parse_mode="HTML"
             )
 
@@ -936,7 +936,7 @@ def setup(context):
     async def _fetch_audio(url: str, yt_title: str, duration: int, cancel_event,
                           need_file_id: bool = False, fallback_chat=None, sem=None,
                           meta: dict = None, thumb_url: str = None, upload_depo: bool = True,
-                          source: str = "ytm") -> dict:
+                          source: str = "ytm", on_progress=None) -> dict:
         """
         Mahnını əvvəl keşdən (depo kanalı) götürür; yoxdursa YouTube-dan yükləyir, depoya atır, keşə yazır.
         Nəticə: {file_id, path, fname, artist, track, sl, cached, vid}
@@ -995,7 +995,7 @@ def setup(context):
                     raise DownloadCancelled("İstifadəçi yükləməni dayandırdı")
                 t_dl = time.time()
                 path = await context.youtube_manager.download_track(
-                    url, sanitize_filename(yt_title), cancel_event=cancel_event
+                    url, sanitize_filename(yt_title), cancel_event=cancel_event, on_progress=on_progress
                 )
                 with contextlib.suppress(OSError):          # 📶 sürət: YouTube → server
                     activity.stage("DL", dl_bytes=os.path.getsize(path), dl_secs=time.time() - t_dl)
@@ -1095,6 +1095,51 @@ def setup(context):
             )
             
             duration = int(selected.get('raw_duration', 0) or 0)
+
+            base_text = (f"{maint_note}{load_action}"
+                         f" <b>{escape(selected['title'])}</b> <b>{selected['duration']}</b>")
+            prog_state = {"t": 0.0, "txt": ""}
+
+            async def on_progress(d: dict):
+                """📶 Canlı yükləmə sürəti: 'x%  · 1.8 MB/s · ~5 san.' (3 saniyədən bir yenilənir)."""
+                now = time.monotonic()
+                from common.formatting import fmt_bytes
+                if d.get("finished"):                       # ✅ yekun: ölçü və orta sürət (throttle yoxdur)
+                    bits = [fmt_bytes(d.get("done") or 0)]
+                    if d.get("avg"):
+                        bits.append(f"⌀ {fmt_bytes(d['avg'])}/s")
+                    if d.get("elapsed"):
+                        bits.append(tr("{n} san.", n=f"{d['elapsed']:.1f}"))
+                    txt = base_text + "\n✅ 📶 <i>" + " · ".join(bits) + "</i>"
+                    prog_state.update(t=now, txt=txt)
+                    with contextlib.suppress(Exception):
+                        await callback.message.bot.edit_message_text(
+                            chat_id=callback.message.chat.id, message_id=user_data['search_message_id'],
+                            text=txt, parse_mode="HTML",
+                            reply_markup=stop_keyboard(f"dlstop:{user_data['search_message_id']}"))
+                    return
+                if now - prog_state["t"] < 3.0:
+                    return
+                done, total, speed, eta = d.get("done") or 0, d.get("total") or 0, d.get("speed") or 0, d.get("eta")
+                bits = []
+                if total:
+                    bits.append(f"{min(99, int(done * 100 / total))}%")
+                if speed:
+                    bits.append(f"{fmt_bytes(speed)}/s")
+                if eta:
+                    bits.append(tr("~{n} san.", n=int(eta)))
+                if not bits:
+                    return
+                txt = base_text + "\n📶 <i>" + " · ".join(bits) + "</i>"
+                if txt == prog_state["txt"]:
+                    return
+                prog_state.update(t=now, txt=txt)
+                with contextlib.suppress(Exception):
+                    await callback.message.bot.edit_message_text(
+                        chat_id=callback.message.chat.id, message_id=user_data['search_message_id'],
+                        text=txt, parse_mode="HTML",
+                        reply_markup=stop_keyboard(f"dlstop:{user_data['search_message_id']}"))
+
             for attempt in (1, 2):
                 # 📦 əvvəl depo/keş, yoxdursa yüklə (song.link paralel)
                 src = ("mix" if user_data.get('command_used') == "mix"
@@ -1103,7 +1148,8 @@ def setup(context):
                     res = await fetch_audio(selected['url'], selected.get('original_title') or selected['title'],
                                             duration, job["event"], meta=selected.get('meta'),
                                             upload_depo=not is_mp3_tester,
-                                            source=selected.get('source') or "ytm")
+                                            source=selected.get('source') or "ytm",
+                                            on_progress=on_progress)
                 file_path = res["path"]
                 sl, artist, track_name = res["sl"], res["artist"], res["track"]
                 caption = build_caption(selected['url'], sl, callback.from_user.id)
@@ -1422,6 +1468,8 @@ def setup(context):
     context.music_run_batch = run_batch
     context.music_fetch_audio = fetch_audio          # depo_filler_plugin: mahnını depoya yükləmək üçün
     context.music_resolve_youtube = resolve_youtube
+    context.music_prepare_track = prepare_track          # tiktok_plugin: tapılmış mahnını yüklə + göndər
+    context.music_deliver_track = deliver_track
     context.music_songlink = get_songlink
 
     # ── ⚡ İnline axtarış və çatdırılma (bot.music.inline) ──

@@ -13,6 +13,7 @@
       - [🔗 Shazam] — Rəsmi Shazam keçidi
 """
 
+import asyncio
 import contextlib
 import hashlib
 import logging
@@ -27,6 +28,7 @@ from aiogram import F, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from common.i18n import _ as tr
 from common.utilities import ui_styled
 
 logger = logging.getLogger(__name__)
@@ -100,61 +102,156 @@ def _parse_track(track: dict) -> dict:
 
 
 def _result_view(item: dict, cache_key: str) -> tuple[str, InlineKeyboardMarkup]:
-    lines = ["🎧 <b>Musiqi tapıldı (Shazam)</b>", "━━━━━━━━━━━━━━━━━━",
-             f"🎵 <b>Mahnı:</b> <b>{escape(item['title'])}</b>", f"👤 <b>İfaçı:</b> <b>{escape(item['artist'])}</b>"]
-    for icon, label, key in (("💿", "Albom", "album"), ("🏷", "Janr", "genre"), ("📅", "Buraxılış ili", "year")):
+    lines = [tr("🎧 <b>Musiqi tapıldı (Shazam)</b>") + (f" · <i>{escape(tr(item['stage']))}</i>" if item.get("stage_no", 1) > 1 else ""), "━━━━━━━━━━━━━━━━━━",
+             tr("🎵 <b>Mahnı:</b> <b>{v}</b>", v=escape(item['title'])), tr("👤 <b>İfaçı:</b> <b>{v}</b>", v=escape(item['artist']))]
+    for icon, label, key in (("💿", tr("Albom"), "album"), ("🏷", tr("Janr"), "genre"), ("📅", tr("Buraxılış ili"), "year")):
         if item.get(key):
             lines.append(f"{icon} <b>{label}:</b> {escape(str(item[key]))}")
-    rows = [[InlineKeyboardButton(text="📥 Yüklə", callback_data=f"shz:dl:{cache_key}"),
-             InlineKeyboardButton(text="🔎 Inline axtar", switch_inline_query_current_chat=item["query"])]]
+    rows = [[InlineKeyboardButton(text=tr("📥 Yüklə"), callback_data=f"shz:dl:{cache_key}"),
+             InlineKeyboardButton(text=tr("🔎 Inline axtar"), switch_inline_query_current_chat=item["query"])]]
     row2 = []
     if item.get("lyrics"):
-        row2.append(InlineKeyboardButton(text="📝 Sözlər", callback_data=f"shz:lyr:{cache_key}"))
+        row2.append(InlineKeyboardButton(text=tr("📝 Sözlər"), callback_data=f"shz:lyr:{cache_key}"))
     if item.get("shazam_url"):
         row2.append(InlineKeyboardButton(text="🔗 Shazam", url=item["shazam_url"]))
     if row2:
         rows.append(row2)
-    rows.append([InlineKeyboardButton(text="✖️ Bağla", callback_data="shz:close")])
+    rows.append([InlineKeyboardButton(text=tr("✖️ Bağla"), callback_data="shz:close")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def recognize_file(input_path: str) -> dict | None:
-    """Yerli faylı (audio və ya video) Shazam ilə tanıyır.
+# 🎯 Çətin mahnılar üçün çoxmərhələli tanıma: fərqli hissələr + səs emalı + sürətləndirilmiş / yavaşladılmış variantlar.
+# (label, başlanğıc payı 0..1 | None=0, müddət san., ffmpeg -af). İlk uğurlu nəticədə dayanır.
+ENHANCE = "highpass=f=80,lowpass=f=12000,dynaudnorm=f=150:g=15,loudnorm=I=-16:TP=-1.5:LRA=11"
+STAGES = [
+    ("başlanğıc", 0.0, 20, ""),
+    ("orta hissə", 0.5, 20, ""),
+    ("səs yaxşılaşdırıldı (başlanğıc)", 0.0, 25, ENHANCE),
+    ("1/4 hissə", 0.25, 15, ""),
+    ("səs yaxşılaşdırıldı (orta)", 0.5, 25, ENHANCE),
+    ("3/4 hissə", 0.75, 15, ""),
+    ("sürətləndirilmiş versiya (sped up)", 0.4, 20, "asetrate=44100*0.85,aresample=44100," + ENHANCE),
+    ("yavaşladılmış versiya (slowed)", 0.4, 20, "asetrate=44100*1.15,aresample=44100," + ENHANCE),
+]
+STAGE_TIMEOUT = 18        # bir mərhələ (ffmpeg + Shazam) üçün
+TOTAL_BUDGET = 75         # bütün mərhələlər üçün ümumi vaxt (san.)
 
-    Mahnı tapılsa _parse_track məlumatlarını lüğət şəklində qaytarır,
-    tapılmasa None qaytarır.
-    """
-    if not os.path.exists(input_path) or os.path.getsize(input_path) < 500:
-        return None
 
-    os.makedirs(TEMP_DIR, exist_ok=True)
-    clip_path = os.path.join(TEMP_DIR, f"rf_clip_{os.getpid()}_{int(time.time() * 1000)}.mp3")
-    target = input_path
-    clip_created = False
+async def _clip(input_path: str, out: str, start: float, dur: int, af: str) -> bool:
+    from common.media import run_ffmpeg
+    args = ["-ss", f"{max(0.0, start):.2f}", "-t", str(dur), "-i", input_path, "-vn", "-ac", "1", "-ar", "44100"]
+    if af:
+        args += ["-af", af]
+    rc, err = await run_ffmpeg(*args, "-acodec", "libmp3lame", "-b:a", "128k", out, timeout=STAGE_TIMEOUT)
+    if rc != 0:
+        logger.debug(f"ffmpeg mərhələ xətası: {err[:160]}")
+    return os.path.exists(out) and os.path.getsize(out) > 1000
+
+
+def _track_key(track: dict) -> str:
+    return f"{(track.get('subtitle') or '').strip().lower()}|{(track.get('title') or '').strip().lower()}"
+
+
+async def _confirm(shazam, input_path: str, total: float, frac: float, dur: int, tag: str, item: dict, af: str = ""):
+    """Səhv tanımanın qarşısı: FƏRQLİ hissədən ikinci parça götürülüb eyni mahnı çıxırmı?
+    → (təsdiqləndi?, fərqli nəticə 'ifaçı - ad' və ya None). Fayl çox qısadırsa təsdiq mümkün deyil → (False, None)."""
+    if not total or total < dur + 12:
+        return False, None
+    other = (frac + 0.45) % 1.0                              # tanındığı hissədən uzaq nöqtə
+    start = min(max(0.0, total * other), max(0.0, total - 15))
+    path = os.path.join(TEMP_DIR, f"rc_{tag}.mp3")
     try:
-        ok = await _extract_audio_clip(input_path, clip_path, duration_sec=25)
-        if ok:
-            target = clip_path
-            clip_created = True
-
-        shazam = _get_shazam()
-        res = await shazam.recognize(target)
+        if not await _clip(input_path, path, start, 15, af):          # eyni emal (süzgəc) ilə
+            return False, None
+        res = await asyncio.wait_for(shazam.recognize(path), STAGE_TIMEOUT)
         track = res.get("track") if isinstance(res, dict) else None
         if not track or not track.get("title"):
-            return None
-
-        cache_key = hashlib.md5(f"{track.get('subtitle', '')}:{track.get('title', '')}".encode()).hexdigest()[:12]
-        item = _parse_track(track)
-        item["cache_key"] = cache_key
-        _remember(cache_key, item)
-        return item
+            return False, None
+        same = _track_key(track) == f"{item['artist'].strip().lower()}|{item['title'].strip().lower()}"
+        return same, (None if same else f"{track.get('subtitle', '')} - {track.get('title', '')}")
     except Exception as e:
-        logger.error(f"Shazam recognize_file xətası: {e}", exc_info=True)
-        return None
+        logger.debug(f"Shazam təsdiq parçası alınmadı: {e}")
+        return False, None
     finally:
-        if clip_created and os.path.exists(clip_path):
-            with contextlib.suppress(Exception):
+        with contextlib.suppress(OSError):
+            os.remove(path)
+
+
+async def recognize_file(input_path: str, on_stage=None, verify: bool = True) -> dict | None:
+    """Yerli faylı (audio və ya video) Shazam ilə tanıyır — ÇOXMƏRHƏLİLİ.
+
+    Mərhələlər (STAGES): başlanğıc → orta hissə → səs yaxşılaşdırma → 1/4 → 3/4 → sped-up / slowed variantlar.
+    İlk uğurlu mərhələdə dayanır. on_stage(i, n, label) — irəliləyiş bildirişi (könüllü).
+    Mahnı tapılsa lüğət qaytarır (item["stage"] — hansı mərhələdə tapıldı), tapılmasa None."""
+    if not os.path.exists(input_path) or os.path.getsize(input_path) < 500:
+        return None
+    from common.media import duration_of
+    os.makedirs(TEMP_DIR, exist_ok=True)
+    try:
+        total = await duration_of(input_path)
+    except Exception:
+        total = 0.0
+    shazam = _get_shazam()
+    t_begin = time.monotonic()
+    tag = f"{os.getpid()}_{int(time.time() * 1000)}"
+    tried = 0
+    weak = None
+    for i, (label, frac, dur, af) in enumerate(STAGES, 1):
+        if time.monotonic() - t_begin > TOTAL_BUDGET:
+            break
+        if total and total < 8 and i > 3:
+            break                                           # çox qısa fayl — yeni hissələr mənasızdır
+        start = 0.0 if not total else min(max(0.0, total * frac), max(0.0, total - dur))
+        if total and total <= dur + 2 and frac > 0 and not af:
+            continue                                        # fayl elə bir parçadır — eyni hissəni təkrarlama
+        clip_path = os.path.join(TEMP_DIR, f"rf_{tag}_{i}.mp3")
+        try:
+            if on_stage:
+                with contextlib.suppress(Exception):
+                    r = on_stage(i, len(STAGES), label)
+                    if hasattr(r, "__await__"):
+                        await r
+            if not await _clip(input_path, clip_path, start, dur, af):
+                continue
+            tried += 1
+            res = await asyncio.wait_for(shazam.recognize(clip_path), STAGE_TIMEOUT)
+            track = res.get("track") if isinstance(res, dict) else None
+            if track and track.get("title"):
+                cache_key = hashlib.md5(f"{track.get('subtitle', '')}:{track.get('title', '')}".encode()).hexdigest()[:12]
+                item = _parse_track(track)
+                item["cache_key"] = cache_key
+                item["stage"] = label
+                item["stage_no"] = i
+                if verify:
+                    item["confirmed"], item["alt"] = await _confirm(shazam, input_path, total, frac, dur, tag, item, af)
+                    if not item["confirmed"]:
+                        can_confirm = bool(total) and total >= dur + 12
+                        if af:
+                            # səs emalı (gücləndirmə / sürət) səs-küyü mahnı kimi göstərə bilər — təsdiqsiz qəbul edilmir
+                            logger.info(f"🎧 Shazam mərhələ {i} ({label}) təsdiqlənmədi, atıldı: "
+                                        f"{item['artist']} - {item['title']}")
+                            continue
+                        if can_confirm:                      # adi parça, amma ikinci parça təsdiq etmədi → zəif namizəd
+                            weak = weak or (i, label, item, cache_key)
+                            continue
+                _remember(cache_key, item)
+                logger.info(f"🎧 Shazam tapdı ({i}/{len(STAGES)} mərhələ: {label})"
+                            f"{'' if item.get('confirmed', True) else ' [təsdiqsiz]'}: {item['artist']} - {item['title']}")
+                return item
+        except asyncio.TimeoutError:
+            logger.debug(f"Shazam mərhələ {i} vaxt aşdı")
+        except Exception as e:
+            logger.warning(f"Shazam mərhələ {i} xətası: {e}")
+        finally:
+            with contextlib.suppress(OSError):
                 os.remove(clip_path)
+    if weak:                                                 # təsdiqlənməyən, amma adi parçada tapılan namizəd
+        i, label, item, cache_key = weak
+        _remember(cache_key, item)
+        logger.info(f"🎧 Shazam zəif namizəd ({i}/{len(STAGES)} mərhələ: {label}): {item['artist']} - {item['title']}")
+        return item
+    logger.info(f"🎧 Shazam tapmadı ({tried} mərhələ sınandı, {time.monotonic() - t_begin:.0f} san.)")
+    return None
 
 
 async def _process_recognition(
@@ -167,10 +264,10 @@ async def _process_recognition(
     """Verilmiş media obyektini yükləyir və Shazam ilə tanıyır."""
     bot = context.bot
     if status_msg is None:
-        status_msg = await message.reply("🎧 <i>Səs dinlənilir və Shazam ilə axtarılır...</i>", parse_mode="HTML")
+        status_msg = await message.reply(tr("🎧 <i>Səs dinlənilir və Shazam ilə axtarılır...</i>"), parse_mode="HTML")
     else:
         with contextlib.suppress(Exception):
-            await status_msg.edit_text("🎧 <i>Səs dinlənilir və Shazam ilə axtarılır...</i>", parse_mode="HTML")
+            await status_msg.edit_text(tr("🎧 <i>Səs dinlənilir və Shazam ilə axtarılır...</i>"), parse_mode="HTML")
 
     os.makedirs(TEMP_DIR, exist_ok=True)
     temp_in = os.path.join(TEMP_DIR, f"in_{message.message_id}_{message.chat.id}")
@@ -179,17 +276,22 @@ async def _process_recognition(
         # Faylı teleqramdan yükləyirik
         await bot.download(target_media, destination=temp_in)
         if not os.path.exists(temp_in) or os.path.getsize(temp_in) < 500:
-            await status_msg.edit_text("⚠️ <i>Səs faylı yüklənə bilmədi və ya çox qısadır.</i>", parse_mode="HTML")
+            await status_msg.edit_text(tr("⚠️ <i>Səs faylı yüklənə bilmədi və ya çox qısadır.</i>"), parse_mode="HTML")
             return
 
-        item = await recognize_file(temp_in)
+        async def _stage(i, n, label):
+            if i > 1:
+                with contextlib.suppress(Exception):
+                    await status_msg.edit_text(
+                        tr("🎧 <i>Çətin mahnıdır — mərhələ {i}/{n}: {label}...</i>", i=i, n=n, label=escape(tr(label))), parse_mode="HTML")
+
+        item = await recognize_file(temp_in, on_stage=_stage)
         if not item or not item.get("title"):
             close_kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✖️ Bağla", callback_data="shz:close")]
+                [InlineKeyboardButton(text=tr("✖️ Bağla"), callback_data="shz:close")]
             ])
             await status_msg.edit_text(
-                "😔 <b>Təəssüf ki, heç bir mahnı tapılmadı.</b>\n"
-                "<i>Səs çox qısa ola bilər, ətraf küy çoxdur və ya bu musiqi Shazam bazasında yoxdur.</i>",
+                tr("😔 <b>Təəssüf ki, heç bir mahnı tapılmadı.</b>\n<i>Səs çox qısa ola bilər, ətraf küy çoxdur və ya bu musiqi Shazam bazasında yoxdur.</i>"),
                 parse_mode="HTML",
                 reply_markup=close_kb,
             )
@@ -219,7 +321,7 @@ async def _process_recognition(
 
     except Exception as e:
         logger.error(f"Shazam tanıma prosesi xətası: {e}", exc_info=True)
-        await status_msg.edit_text(f"⚠️ <i>Musiqi axtarışı zamanı xəta baş verdi: {escape(str(e)[:100])}</i>", parse_mode="HTML")
+        await status_msg.edit_text(tr("⚠️ <i>Musiqi axtarışı zamanı xəta baş verdi: {err}</i>", err=escape(str(e)[:100])), parse_mode="HTML")
     finally:
         if os.path.exists(temp_in):
             with contextlib.suppress(Exception):
@@ -280,7 +382,7 @@ def setup(context):
             return
 
         # Əgər reply və media yoxdursa bələdçi göstər
-        guide_text = (
+        guide_text = tr(
             "🔍 <b>Shazam — Musiqi Tanıma Bələdçisi</b>\n"
             "━━━━━━━━━━━━━━━━━━\n"
             "Mahnının adını tapmaq üçün 3 asan yol:\n\n"
@@ -293,8 +395,8 @@ def setup(context):
             "<i>⚡ Bot bir neçə saniyə ərzində mahnını tapıb adını və yükləmə linkini təqdim edəcək!</i>"
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔎 Musiqi Axtar (İnline)", switch_inline_query_current_chat="")],
-            [InlineKeyboardButton(text="✖️ Bağla", callback_data="shz:close")]
+            [InlineKeyboardButton(text=tr("🔎 Musiqi Axtar (İnline)"), switch_inline_query_current_chat="")],
+            [InlineKeyboardButton(text=tr("✖️ Bağla"), callback_data="shz:close")]
         ])
         with ui_styled("user"):
             await message.reply(guide_text, parse_mode="HTML", reply_markup=kb)
@@ -306,13 +408,12 @@ def setup(context):
             return
         _remember_pending(message.chat.id, message.message_id, message.voice, "voice")
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🎧 Shazam ilə tanı", callback_data=f"shz:rec:{message.message_id}")],
-            [InlineKeyboardButton(text="✖️ Bağla", callback_data="shz:close")]
+            [InlineKeyboardButton(text=tr("🎧 Shazam ilə tanı"), callback_data=f"shz:rec:{message.message_id}")],
+            [InlineKeyboardButton(text=tr("✖️ Bağla"), callback_data="shz:close")]
         ])
         with ui_styled("user"):
             await message.reply(
-                "🎤 <b>Səsli mesaj qəbul edildi.</b>\n"
-                "<i>Bu səsdəki musiqini Shazam ilə axtarmaq üçün aşağıdakı düyməyə vurun:</i>",
+                tr("🎤 <b>Səsli mesaj qəbul edildi.</b>\n<i>Bu səsdəki musiqini Shazam ilə axtarmaq üçün aşağıdakı düyməyə vurun:</i>"),
                 parse_mode="HTML",
                 reply_markup=kb,
             )
@@ -321,13 +422,12 @@ def setup(context):
     async def pm_video_note_prompt(message: types.Message):
         _remember_pending(message.chat.id, message.message_id, message.video_note, "video_note")
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🎧 Shazam ilə tanı", callback_data=f"shz:rec:{message.message_id}")],
-            [InlineKeyboardButton(text="✖️ Bağla", callback_data="shz:close")]
+            [InlineKeyboardButton(text=tr("🎧 Shazam ilə tanı"), callback_data=f"shz:rec:{message.message_id}")],
+            [InlineKeyboardButton(text=tr("✖️ Bağla"), callback_data="shz:close")]
         ])
         with ui_styled("user"):
             await message.reply(
-                "📹 <b>Video qeyd qəbul edildi.</b>\n"
-                "<i>Bu videodakı musiqini Shazam ilə axtarmaq üçün aşağıdakı düyməyə vurun:</i>",
+                tr("📹 <b>Video qeyd qəbul edildi.</b>\n<i>Bu videodakı musiqini Shazam ilə axtarmaq üçün aşağıdakı düyməyə vurun:</i>"),
                 parse_mode="HTML",
                 reply_markup=kb,
             )
@@ -338,13 +438,12 @@ def setup(context):
             return
         _remember_pending(message.chat.id, message.message_id, message.video, "video")
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🎧 Shazam ilə tanı", callback_data=f"shz:rec:{message.message_id}")],
-            [InlineKeyboardButton(text="✖️ Bağla", callback_data="shz:close")]
+            [InlineKeyboardButton(text=tr("🎧 Shazam ilə tanı"), callback_data=f"shz:rec:{message.message_id}")],
+            [InlineKeyboardButton(text=tr("✖️ Bağla"), callback_data="shz:close")]
         ])
         with ui_styled("user"):
             await message.reply(
-                "🎬 <b>Video qəbul edildi.</b>\n"
-                "<i>Videodakı arxa fon musiqisini Shazam ilə tapmaq üçün aşağıdakı düyməyə vurun:</i>",
+                tr("🎬 <b>Video qəbul edildi.</b>\n<i>Videodakı arxa fon musiqisini Shazam ilə tapmaq üçün aşağıdakı düyməyə vurun:</i>"),
                 parse_mode="HTML",
                 reply_markup=kb,
             )
@@ -365,13 +464,12 @@ def setup(context):
             return
         _remember_pending(message.chat.id, message.message_id, message.document, "document")
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🎧 Shazam ilə tanı", callback_data=f"shz:rec:{message.message_id}")],
-            [InlineKeyboardButton(text="✖️ Bağla", callback_data="shz:close")]
+            [InlineKeyboardButton(text=tr("🎧 Shazam ilə tanı"), callback_data=f"shz:rec:{message.message_id}")],
+            [InlineKeyboardButton(text=tr("✖️ Bağla"), callback_data="shz:close")]
         ])
         with ui_styled("user"):
             await message.reply(
-                "📁 <b>Video fayl qəbul edildi.</b>\n"
-                "<i>Fayldakı musiqini Shazam ilə tapmaq üçün aşağıdakı düyməyə vurun:</i>",
+                tr("📁 <b>Video fayl qəbul edildi.</b>\n<i>Fayldakı musiqini Shazam ilə tapmaq üçün aşağıdakı düyməyə vurun:</i>"),
                 parse_mode="HTML",
                 reply_markup=kb,
             )
@@ -413,10 +511,10 @@ def setup(context):
                     target_media, mtype = rep.document, "document"
 
             if not target_media:
-                await cb.answer("⚠️ Media faylı tapılmadı və ya köhnəlib.", show_alert=True)
+                await cb.answer(tr("⚠️ Media faylı tapılmadı və ya köhnəlib."), show_alert=True)
                 return
 
-            await cb.answer("🎧 Shazam ilə axtarılır...")
+            await cb.answer(tr("🎧 Shazam ilə axtarılır..."))
             with ui_styled("user"):
                 await _process_recognition(
                     cb.message.reply_to_message or cb.message,
@@ -432,9 +530,9 @@ def setup(context):
 
         if action == "dl":
             if not item:
-                await cb.answer("⚠️ Mahnı məlumatı tapılmadı və ya köhnəlib.", show_alert=True)
+                await cb.answer(tr("⚠️ Mahnı məlumatı tapılmadı və ya köhnəlib."), show_alert=True)
                 return
-            await cb.answer("📥 Mahnı axtarılır və yüklənir...")
+            await cb.answer(tr("📥 Mahnı axtarılır və yüklənir..."))
             search_query = item.get("query") or f"{item.get('artist')} - {item.get('title')}"
             
             # Musiqi yükləmə sistemini işə salırıq
@@ -444,22 +542,21 @@ def setup(context):
                 await handler(fake_msg, search_query, "shazam")
             else:
                 await cb.message.reply(
-                    f"🎵 <b>{escape(search_query)}</b>\n\n"
-                    f"Yükləmək üçün əmrdən istifadə edin: <code>/music {escape(search_query)}</code>",
+                    tr("🎵 <b>{q}</b>\n\nYükləmək üçün əmrdən istifadə edin: <code>/music {q}</code>", q=escape(search_query)),
                     parse_mode="HTML"
                 )
             return
 
         if action == "lyr":
             if not item or not item.get("lyrics"):
-                await cb.answer("📝 Bu mahnı üçün sözlər tapılmadı.", show_alert=True)
+                await cb.answer(tr("📝 Bu mahnı üçün sözlər tapılmadı."), show_alert=True)
                 return
             await cb.answer()
             lyrics = item["lyrics"]
             if len(lyrics) > 3500:                      # mesaj limiti 4096 (şəkil altı isə cəmi 1024 — ona görə ayrıca)
-                lyrics = lyrics[:3500] + "\n\n...(davamı qısaldıldı)"
+                lyrics = lyrics[:3500] + tr("\n\n...(davamı qısaldıldı)")
             text = f"📝 <b>{escape(item['artist'])} — {escape(item['title'])}</b>\n━━━━━━━━━━━━━━━━━━\n\n{escape(lyrics)}"
-            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✖️ Bağla", callback_data="shz:close")]])
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=tr("✖️ Bağla"), callback_data="shz:close")]])
             with ui_styled("user"):
                 await cb.message.reply(text, parse_mode="HTML", reply_markup=kb)
             return
