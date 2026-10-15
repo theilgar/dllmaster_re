@@ -13,7 +13,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup
 
 from bot.menus.navigation import nav_row
 from bot.menus.views.music import mus_view
-from bot.menus.state import get_context, reset_inputs, safe_edit_cb
+from bot.menus.state import answer_and_edit, get_context, reset_inputs, safe_edit_cb
 from bot.menus.views.dev import dev_hub_view, git_summary, run_updates, upd_view
 from bot.menus.views.system_hub import accel_view, bots_view, sys_kb, sys_text
 from common.menu import LINE
@@ -144,9 +144,9 @@ async def handle_system_action(cb: CallbackQuery, parts: list[str], action: str)
     ctx = get_context()
 
     if action == "sys":
-        await cb.answer()
         reset_inputs()
-        await safe_edit_cb(cb, sys_text(), sys_kb())
+        text = await asyncio.to_thread(sys_text)               # sistem sorğuları loop-u tutmasın
+        await answer_and_edit(cb, text, sys_kb())              # answer + edit paralel
         return True
 
     if action in ("accel", "accel_refresh", "accel_t", "accel_c"):

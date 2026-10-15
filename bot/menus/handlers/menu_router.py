@@ -51,6 +51,7 @@ from bot.menus.state import (
     get_context,
     rec_inp,
     reset_inputs,
+    answer_and_edit,
     safe_edit_cb,
 )
 from bot.menus.views.audit import audit_settings_view
@@ -291,14 +292,14 @@ async def menu_callback(cb: CallbackQuery):
         return
 
     if action == "main":
-        await cb.answer()
         if bc.get("stage") and bc.get("stage") != "sending":
             await delete_preview()
             bc_reset()
         reset_inputs()
         from bot.menus.navigation import clear_nav
         clear_nav(cb.from_user.id)
-        await safe_edit_cb(cb, await asyncio.to_thread(main_text, force=True), main_kb())   # COUNT sorğuları loop-da olmasın
+        text = await asyncio.to_thread(main_text, force=True)   # COUNT sorğuları loop-da olmasın
+        await answer_and_edit(cb, text, main_kb())             # answer + edit paralel
         return
 
     if action == "back":

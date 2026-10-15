@@ -131,6 +131,7 @@ CANCEL_DIR = os.path.join(tempfile.gettempdir(), "dllmaster_cancel")
 MODES = {"process": "🧠 Proses (bütün nüvələr)", "thread": "🧵 Thread (tək nüvə)"}
 S_MODE, S_USER, S_DEPO, S_THREADS, S_NICE, S_WATCH = (
     "perf:mode", "perf:user_procs", "perf:depo_procs", "perf:threads", "perf:nice", "perf:watchdog")
+S_THREADS_AUTO, S_NICE_AUTO = "perf:threads_auto", "perf:nice_auto"     # 🤖 Avto: dəyəri sistem seçir (defolt — Manual)
 USER_STEPS = [1, 2, 3, 4, 6, 8, 12, 16]
 DEPO_STEPS = [1, 2, 4, 6, 8, 12, 16, 24, 32, 48, 64]
 THREAD_STEPS = [16, 32, 48, 64, 96, 128, 192, 256, 384, 512]
@@ -167,9 +168,43 @@ def _int(key, default, lo, hi):
     return _S.int(key, default, lo=lo, hi=hi)
 
 
+_RAM_TOTAL_MB = []
+
+
+def _total_ram_mb() -> int:
+    if not _RAM_TOTAL_MB:
+        mb = 0
+        try:
+            for line in _read("/proc/meminfo").splitlines():
+                if line.startswith("MemTotal:"):
+                    mb = int(line.split()[1]) // 1024
+                    break
+        except Exception as e:
+            logger.debug(f"MemTotal oxunmadı: {e!r}")
+        _RAM_TOTAL_MB.append(mb)
+    return _RAM_TOTAL_MB[0]
+
+
+def default_mode() -> str:
+    """🤖 Avto rejim: tək nüvə və ya az RAM (<1 GB) — thread; qalanında proses."""
+    ram = _total_ram_mb()
+    return "process" if CORES > 1 and (not ram or ram >= 1024) else "thread"
+
+
+def mode_auto() -> bool:
+    return not _get(S_MODE)
+
+
 def mode() -> str:
-    m = _get(S_MODE, "process" if CORES > 1 else "thread")
+    m = _get(S_MODE, default_mode())
     return m if m in MODES else "process"
+
+
+def set_mode_auto():
+    """Əl ilə seçimi sil — rejim serverə görə seçilir (default_mode)."""
+    _db().set_setting(S_MODE, None)
+    if mode() == "thread":
+        spawn(shutdown_pools())
 
 
 def user_procs() -> int:
@@ -180,12 +215,47 @@ def depo_procs() -> int:
     return _int(S_DEPO, max(2, CORES * 2), 1, DEPO_STEPS[-1])
 
 
+def base_threads() -> int:
+    return max(THREAD_STEPS[0], min(THREAD_STEPS[-1], max(64, CORES * 8)))
+
+
+def threads_auto() -> bool:
+    return _get(S_THREADS_AUTO, "off") == "on" and not turbo_on()      # 🔥 turbo öz dəyərlərini qoyur
+
+
+def nice_auto() -> bool:
+    return _get(S_NICE_AUTO, "off") == "on" and not turbo_on()
+
+
+# 🤖 Avto dəyərlər yaddaşdadır (yadda saxlanmır): restartdan sonra defoltdan başlayıb yenidən öyrənir
+_AUTO = {"threads": None, "nice": None, "idle": 0, "calm": 0}
+AUTO_NICE_BASE, AUTO_NICE_MAX = 5, 15
+
+
 def threads() -> int:
+    if threads_auto():
+        return _AUTO["threads"] or base_threads()
     return _int(S_THREADS, max(64, CORES * 8), THREAD_STEPS[0], THREAD_STEPS[-1])
 
 
 def nice() -> int:
+    if nice_auto():
+        return _AUTO["nice"] if _AUTO["nice"] is not None else AUTO_NICE_BASE
     return _int(S_NICE, 5, 0, 19)
+
+
+def set_threads_auto(on: bool):
+    _set(S_THREADS_AUTO, "on" if on else "off")
+    if on:
+        _AUTO["threads"], _AUTO["idle"] = None, 0
+    else:
+        _AUTO["threads"] = None
+    apply_threads(force=True)
+
+
+def set_nice_auto(on: bool):
+    _set(S_NICE_AUTO, "on" if on else "off")
+    _AUTO["nice"], _AUTO["calm"] = None, 0
 
 
 def watchdog_on() -> bool:
@@ -935,11 +1005,70 @@ def _scale_step():
             logger.info(f"🚀 {pool.label}: {n} boş proses bağlandı (RAM qaytarıldı)")
 
 
+def _renice_workers(n: int):
+    """Açıq işçi proseslərə nice-i yuxarı qaldır (aşağı prioritet). Azaltmaq icazə tələb edir — yeni proseslərə qalır."""
+    for pool in LANES.values():
+        for w in pool.workers:
+            if isinstance(w, _Worker) and w.alive:
+                try:
+                    if os.getpriority(os.PRIO_PROCESS, w.proc.pid) < n:
+                        os.setpriority(os.PRIO_PROCESS, w.proc.pid, n)
+                except (OSError, AttributeError):
+                    pass
+
+
+def _auto_tune():
+    """🤖 Thread sayı və nice — loop gecikməsinə, thread növbəsinə görə (hər SCALE_EVERY san.)."""
+    t_auto, n_auto = threads_auto(), nice_auto()
+    if not (t_auto or n_auto):
+        return
+    w = WATCHDOG.snapshot() if WATCHDOG.enabled else {"lag_avg": 0.0, "now_frozen": False}
+    laggy = w["now_frozen"] or w["lag_avg"] > LAG_LIMIT
+    calm = not laggy and w["lag_avg"] < LAG_LIMIT / 2
+    if t_auto:
+        cur = _AUTO["threads"] or base_threads()
+        lo, hi = base_threads(), min(THREAD_STEPS[-1], max(128, CORES * 16))   # çox thread = GIL rəqabəti
+        st = thread_pool_stats()
+        queued, active = st.get("queued", 0), st.get("active", 0)
+        new = cur
+        if laggy:
+            new = max(lo, cur - 8)
+        elif queued >= 8 and calm:
+            new = min(hi, cur + max(8, cur // 4))
+            _AUTO["idle"] = 0
+        elif queued == 0 and active < cur * 0.25:
+            _AUTO["idle"] += 1
+            if _AUTO["idle"] >= 20 and cur > lo:               # ~60 san. boş
+                new, _AUTO["idle"] = max(lo, cur - 8), 0
+        else:
+            _AUTO["idle"] = 0
+        _AUTO["threads"] = new
+        if new != cur:
+            apply_threads(force=True)
+            MON.event(f"🧵 Thread {cur}→{new} (növbə {queued}, aktiv {active}, gecikmə {w['lag_avg'] * 1000:.0f} ms)")
+    if n_auto:
+        cur = _AUTO["nice"] if _AUTO["nice"] is not None else AUTO_NICE_BASE
+        new = cur
+        if laggy:
+            new, _AUTO["calm"] = min(AUTO_NICE_MAX, cur + 2), 0
+        elif calm:
+            _AUTO["calm"] += 1
+            if _AUTO["calm"] >= 10 and cur > AUTO_NICE_BASE:    # ~30 san. sakit
+                new, _AUTO["calm"] = max(AUTO_NICE_BASE, cur - 1), 0
+        else:
+            _AUTO["calm"] = 0
+        _AUTO["nice"] = new
+        if new != cur:
+            _renice_workers(new)
+            MON.event(f"🐢 nice +{cur}→+{new} (gecikmə {w['lag_avg'] * 1000:.0f} ms)")
+
+
 async def _scaler():
     while True:
         await asyncio.sleep(SCALE_EVERY)
         try:
             await asyncio.to_thread(MON.sample)
+            _auto_tune()
             if mode() == "process" and autoscale_on():
                 _scale_step()
         except Exception as e:

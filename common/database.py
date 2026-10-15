@@ -251,6 +251,8 @@ class Database:
         # tutanda event loop-dakı sinxron sorğu (get_setting yox, is_premium, upsert_user ...) bağlantı gözləyib
         # bütün botu dondururdu. İndi: DB_POOL_MAX (default 40) — PostgreSQL max_connections 100-dür;
         # bot + userbot bir prosesdədir (init.py), qalan bağlantılar psql / pg_dump üçün ehtiyatdır.
+        self._bg = None                       # ayar yazıları üçün tək fon thread-i (_write_behind)
+        self._bg_lock = threading.Lock()
         max_size = max_size or int(os.getenv("DB_POOL_MAX", "40"))
         min_size = min_size or min(4, max_size)
         self.dsn = dsn                                # common/backup.py (pg_dump / pg_restore) üçün
@@ -298,6 +300,7 @@ class Database:
         return self._pool
 
     def close(self):
+        self.flush_writes()
         self._prem_cache.clear()
         try:
             self._pool.close(timeout=2.0)
@@ -377,18 +380,46 @@ class Database:
     def get_setting(self, key, default=None):
         return self._settings.get(key, default)
 
+    def _write_behind(self, sql, params):
+        """Event loop thread-indən çağırılanda DB yazısı fon thread-ində, SIRA ilə gedir (düymə cavabı DB gözləmir).
+        Oxu həmişə yaddaş keşindən olduğu üçün (get_setting) dəyər dərhal görünür. Loop yoxdursa — adi sinxron yazı."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            self._exec(sql, params)
+            return
+
+        def work():
+            try:
+                self._exec(sql, params)
+            except Exception as e:
+                logger.warning("Ayar bazaya yazılmadı (%s): %r", params[0] if params else "?", e)
+
+        with self._bg_lock:
+            if self._bg is None:
+                from concurrent.futures import ThreadPoolExecutor
+                self._bg = ThreadPoolExecutor(max_workers=1, thread_name_prefix="db-settings")
+            self._bg.submit(work)
+
+    def flush_writes(self):
+        """Növbədəki fon yazılarını gözlə (shutdown / testlər üçün)."""
+        with self._bg_lock:
+            ex, self._bg = self._bg, None
+        if ex is not None:
+            ex.shutdown(wait=True)
+
     def set_setting(self, key, value):
         value = None if value is None else str(value)
-        self._exec(
+        self._settings[key] = value
+        self._write_behind(
             "INSERT INTO settings(key, value) VALUES(%s, %s) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (key, value),
         )
-        self._settings[key] = value
 
     def delete_setting(self, key: str):
-        self._exec("DELETE FROM settings WHERE key=%s", (key,))
         self._settings.pop(key, None)
+        self._write_behind("DELETE FROM settings WHERE key=%s", (key,))
 
     # ───────────── istifadəçilər ─────────────
     def upsert_user(self, user_id, username=None, first_name=None, last_name=None):

@@ -20,8 +20,8 @@ logger = logging.getLogger(__name__)
 
 
 def mode_btn(label: str, auto: bool, prefix: str) -> InlineKeyboardButton:
-    tag = "🤖 Avto" if auto else "✋ Manual"
-    return InlineKeyboardButton(text=f"{label}: {tag}", callback_data=f"menu:{prefix}:tog")
+    """🤖 Avto / ✋ Manual — callback <prefix>:auto|manual (handler yalnız bu iki dəyəri qəbul edir)."""
+    return panel.mode(label, auto, f"menu:{prefix}:{'manual' if auto else 'auto'}")
 
 
 def perf_button_label() -> str:
@@ -110,6 +110,7 @@ PERF_INFO = {
     "c": "🎯 CPU hədəfi: Avto-miqyas üçün CPU faiz həddi.",
     "r": "💾 RAM ehtiyatı: Serveri OOM qəzasından qoruyan ehtiyat RAM.",
     "n": "🐢 nice: İşçi proseslərin prioriteti (0-19).",
+    "auto": "🤖 Avto: 🧵 thread sayı növbə və bot gecikməsinə görə artıb-azalır; 🐢 nice bot ləngiyəndə artır (işçilər botu sıxmasın), sakitləşəndə +5-ə qayıdır. Turbo açıq olanda əl ilə dəyərlər keçərlidir.",
 }
 
 
@@ -230,7 +231,8 @@ def perf_hub_view(note: str = "") -> tuple[str, InlineKeyboardMarkup]:
                 panel.btn(
                     "Rejim: 🧠 Proses  ›  🧵 Thread" if m == "process" else "Rejim: 🧵 Thread  ›  🧠 Proses",
                     "menu:perf:mode:thread" if m == "process" else "menu:perf:mode:process",
-                )
+                ),
+                panel.mode("⚙️ Seçim", cp.mode_auto(), f"menu:perf:mode:{'manual' if cp.mode_auto() else 'auto'}"),
             ],
         ]
     )
@@ -252,8 +254,16 @@ def perf_hub_view(note: str = "") -> tuple[str, InlineKeyboardMarkup]:
                 ]
             )
     t_btn = f"🧵 Thread: {cp.threads()}" + (f" ({t_act} aktiv)" if t_act else "")
+    t_auto, n_auto = cp.threads_auto(), cp.nice_auto()
     rows += [
-        [_btn(t_btn, "perf:pick:t"), _btn(f"🐢 nice: +{cp.nice()}", "perf:pick:n")],
+        [
+            panel.mode(f"🧵 Thread {cp.threads()}" if t_auto else "🧵 Thread", t_auto,
+                       f"menu:perf:tauto:{'manual' if t_auto else 'auto'}"),
+            panel.mode(f"🐢 nice +{cp.nice()}" if n_auto else "🐢 nice", n_auto,
+                       f"menu:perf:nauto:{'manual' if n_auto else 'auto'}"),
+        ],
+        ([_btn(t_btn, "perf:pick:t")] if not t_auto else []) + ([_btn(f"🐢 nice: +{cp.nice()}", "perf:pick:n")] if not n_auto else [])
+        or [_btn("ℹ️ Avto necə işləyir", "perf:info:auto")],
         [
             panel.toggle("🫀 Watchdog", cp.WATCHDOG.enabled, "menu:perf:wd", compact=True),
             _btn("⚡ Hovuz proseslərini yenilə", "perf:restart"),

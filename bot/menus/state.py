@@ -3,6 +3,7 @@ bot.menus.state
 Mərkəzi FSM vəziyyətləri, mətn gözləmə reyestrləri və panel redaktə köməkçiləri.
 """
 
+import asyncio
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -106,6 +107,15 @@ async def delete_preview(context: Any = None):
         except Exception as _e:
             logger.debug("Broadcast önbaxış mesajı silinərkən xəta: %r", _e)
         bc["preview_id"] = None
+
+
+async def answer_and_edit(cb: CallbackQuery, text: str, kb=None):
+    """cb.answer() və mesajı yeniləməni paralel göndərir (iki Telegram sorğusu ardıcıl yox, eyni anda).
+    Qeyd: cb.answer() coroutine yox, aiogram metod obyektidir — gather-ə birbaşa verilmir (unhashable)."""
+    async def _answer():
+        await cb.answer()
+
+    await asyncio.gather(_answer(), safe_edit_cb(cb, text, kb))
 
 
 async def safe_edit_cb(cb: CallbackQuery, text: str, kb=None):

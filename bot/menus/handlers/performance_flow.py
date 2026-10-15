@@ -71,6 +71,19 @@ async def _mcb_perf(cb: CallbackQuery, parts: list, action: str):
     elif sub == "mode" and arg in cp.MODES:
         cp.set_mode(arg)
         await cb.answer(cp.MODES[arg])
+    elif sub == "mode" and arg in ("auto", "manual"):
+        if arg == "auto":
+            cp.set_mode_auto()
+            await cb.answer(f"🤖 Avto: serverə görə {cp.MODES[cp.mode()]}")
+        else:
+            cp.set_mode(cp.mode())
+            await cb.answer("✋ Manual — rejimi özün seç")
+    elif sub == "tauto" and arg in ("auto", "manual"):
+        cp.set_threads_auto(arg == "auto")
+        await cb.answer("🤖 Avto: thread sayını bot tənzimləyir" if arg == "auto" else "✋ Manual — thread sayını özün seç")
+    elif sub == "nauto" and arg in ("auto", "manual"):
+        cp.set_nice_auto(arg == "auto")
+        await cb.answer("🤖 Avto: nice-i bot tənzimləyir" if arg == "auto" else "✋ Manual — nice-i özün seç")
     elif sub in ("u", "d", "t", "n") and arg in ("+", "-"):
         fn = {"u": cp.step_user, "d": cp.step_depo, "t": cp.step_threads, "n": cp.step_nice}[
             sub

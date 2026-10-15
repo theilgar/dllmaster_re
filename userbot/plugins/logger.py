@@ -19,6 +19,7 @@ Komandalar:
   .rec target del|ed|ban|mbr|adm on|off — audit axınını ayrıca aç / söndür (jurnalda qalır)
   .deleted · .edited · .bans · .members · .actions [say] — jurnal
 """
+import asyncio
 import collections
 import contextlib
 import contextvars
@@ -29,6 +30,7 @@ import time
 from html import escape, unescape
 
 from telethon import events, types, utils
+from telethon.errors import FloodWaitError
 
 from common.destinations import extract_topic_id, parse_destination_target as parse_target_string
 from common.utilities import format_clock as fmt_dur, tg_media_label as get_media_label, tg_name
@@ -562,12 +564,41 @@ def remember_target(ub, chat, topic=None, title: str = ""):
                  json.dumps([[chat, topic, title or prev or chat]] + old, ensure_ascii=False)[:4000])
 
 
+# ⏳ FloodWait: Telegram "A wait of N seconds" deyəndə eyni hədəfə göndərmələr SIRA ilə gözləyir (bir hədəfə bir kilid)
+# və gözləmədən sonra təkrar cəhd olunur — əvvəl hər mesaj dərhal ikinci dəfə vurub flood-u uzadırdı və
+# "Saved Messages-ə yönləndirmə" ilə audit məzmununu yanlış çata atırdı.
+FLOOD_MAX_WAIT = 600
+_FLOOD_UNTIL: dict = {}
+_SEND_LOCKS: dict = {}
+
+
 async def send_to_target(ub, client, stream: str = "vc", text=None, file=None, caption=None, attributes=None,
                          silent: bool = False, chat_id=None):
     """Loq və qeydləri təyin olunmuş hədəf kanal, qrup və ya topic-ə göndərir.
-    Söndürülmüş audit axını (stream_on) — heç nə göndərilmir, None. silent — bildirişsiz."""
+    Söndürülmüş audit axını (stream_on) — heç nə göndərilmir, None. silent — bildirişsiz.
+    FloodWait olarsa hədəf üzrə gözləyir (FLOOD_MAX_WAIT-dən uzundursa mesaj atılır)."""
     if not stream_on(ub, stream, chat_id):
         return None
+    tc, _tt, _ = get_stream_target(ub, stream, chat_id)
+    key = str(tc or "me")
+    lock = _SEND_LOCKS.setdefault(key, asyncio.Lock())
+    async with lock:
+        for attempt in (1, 2):
+            wait = _FLOOD_UNTIL.get(key, 0) - time.time()
+            if wait > FLOOD_MAX_WAIT:
+                logger.warning(f"⏳ Hədəf ({key}) {int(wait)} san. flood-dadır — mesaj atıldı")
+                return None
+            if wait > 0:
+                await asyncio.sleep(wait)
+            try:
+                return await _send_to_target(ub, client, stream, text, file, caption, attributes, silent, chat_id)
+            except FloodWaitError as e:
+                _FLOOD_UNTIL[key] = time.time() + e.seconds + 1
+                logger.warning(f"⏳ FloodWait ({key}): {e.seconds} san." + (" — gözlənilir və təkrar göndərilir" if attempt == 1 else " — mesaj atıldı"))
+        return None
+
+
+async def _send_to_target(ub, client, stream, text, file, caption, attributes, silent, chat_id):
     tc, tt, _ = get_stream_target(ub, stream, chat_id)
     dest = tc if tc else "me"
 
@@ -604,6 +635,8 @@ async def send_to_target(ub, client, stream: str = "vc", text=None, file=None, c
                 link_preview=False,
                 **kwargs
             )
+    except FloodWaitError:
+        raise                                       # send_to_target gözləyib təkrar edəcək
     except Exception as e:
         logger.warning(f"⚠️ Hədəfə göndərmə xətası ({dest}, topic={tt}): {e} — reply_to olmadan təkrar cəhd edilir")
         try:
@@ -624,6 +657,8 @@ async def send_to_target(ub, client, stream: str = "vc", text=None, file=None, c
                     silent=silent,
                     link_preview=False,
                 )
+        except FloodWaitError:
+            raise
         except Exception as ex2:
             logger.error(f"❌ Hədəfə göndərmə tam xətası ({dest}): {ex2}")
             if entity != "me":
