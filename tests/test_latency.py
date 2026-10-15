@@ -42,3 +42,12 @@ def test_exception_still_recorded():
     except ValueError:
         pass
     assert latency.snapshot()["count"] == 1
+
+
+def test_detail_includes_long_jobs_and_reset():
+    latency.record("🖱 menu:sys", 0.4)
+    latency.record("💬 /play", 12.0)
+    d = {r[0]: r for r in latency.detail()}
+    assert d["💬 /play"][6] is True and d["🖱 menu:sys"][6] is False
+    assert latency.detail()[0][0] == "💬 /play"            # orta üzrə azalan
+    assert latency.reset() == 2 and latency.detail() == []

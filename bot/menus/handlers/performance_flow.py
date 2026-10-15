@@ -115,6 +115,15 @@ async def _mcb_perf(cb: CallbackQuery, parts: list, action: str):
         await cb.answer(f"🎯 CPU hədəfi {cp.step_target(1 if arg == '+' else -1)}%")
     elif sub == "r" and arg in ("+", "-"):
         await cb.answer(f"💾 RAM ehtiyatı {cp.step_reserve(1 if arg == '+' else -1)} MB")
+    elif sub == "lat" or sub == "latr":
+        from bot.core import latency
+        from bot.menus.views.performance import latency_detail_view
+        note = ""
+        if sub == "latr":
+            note = f"🗑 {latency.reset()} ölçü silindi"
+        await cb.answer()
+        await safe_edit_cb(cb, *latency_detail_view(note))
+        return
     elif sub == "cores":
         await cb.answer()
         await safe_edit_cb(cb, *perf_cores_view())

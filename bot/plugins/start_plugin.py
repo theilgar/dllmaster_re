@@ -26,7 +26,7 @@ from common.database import get_db, is_creator
 from common import i18n, tiers
 from common.i18n import _ as tr                       # 🌐 "_" bu faylda dəyişən adı kimi də işlənir
 from bot.core.welcome import send_welcome, send_media, get_text_template, render_template, ui_styled
-from bot.core.stars import plans_for_sale, per_month, buy_keyboard, TIP_AMOUNTS
+from bot.core.stars import plan_offers, plans_for_sale, per_month, buy_keyboard, TIP_AMOUNTS, sale_active, sale_settings
 from common.formatting import fmt_date
 from common.utilities import safe_delete, spawn
 
@@ -277,7 +277,28 @@ def build_private_text(first_name: str, bot_username: str, user_id: int) -> str:
         "status": status_line(user_id),
         "creator": CREATOR_USERNAME,
     })
-    return tidy(tiers.strip_hidden(text, user_id))      # 🎛 bağlı imkanların sətirləri görünmür
+    text = tidy(tiers.strip_hidden(text, user_id))      # 🎛 bağlı imkanların sətirləri görünmür
+    banner = sale_banner(user_id)
+    return f"{text}\n\n{banner}" if banner else text
+
+
+def sale_banner(user_id: int) -> str:
+    """🏷 Aktiv endirim varsa /start-da bir sətirlik elan (ömürlük premiumu və creator-u maraqlandırmır)."""
+    try:
+        if not sale_active() or is_creator(user_id):
+            return ""
+        cur = get_db().get_premium(user_id)
+        if cur and cur["until"] is None:
+            return ""
+        s = sale_settings()
+        line = tr("🔥 <b>Premium endirimi -{pct}%</b>", pct=s["pct"])
+        if s["end"]:
+            from datetime import datetime
+            from common.formatting import get_tz
+            line += " · " + tr("{date} tarixinədək", date=datetime.fromtimestamp(s["end"], get_tz()).strftime("%d.%m.%Y %H:%M"))
+        return line
+    except Exception:
+        return ""
 
 
 def depo_rows() -> list:
@@ -327,7 +348,9 @@ def private_keyboard(bot_username: str, user_id: int = None) -> InlineKeyboardMa
     except Exception:
         sell = True
     if is_start_button_enabled("premium") and sell:
-        extra.append(InlineKeyboardButton(text=tr("💎 Premium al"), callback_data="sg:premium"))
+        extra.append(InlineKeyboardButton(
+            text=(tr("🔥 Premium -{pct}%", pct=sale_settings()["pct"]) if sale_active() else tr("💎 Premium al")),
+            callback_data="sg:premium"))
     for i in range(0, len(extra), 2):
         rows.append(extra[i:i + 2])
 
@@ -544,8 +567,19 @@ def premium_info(user_id: int):
     if not plans:
         return status, tr("<i>Premium hazırda satışda deyil. Ətraflı: @{creator}</i>", creator=CREATOR_USERNAME), None
     stars = tr("ulduz")
-    lines = "\n".join(f"⭐ {escape(label)} — <b>{price}</b> {stars}{per_month(days, price)}"
-                      for _, days, label, price in plans)
+    lines = "\n".join(
+        (f"🔥 {escape(label)} — <s>{base}</s> <b>{price}</b> {stars}{per_month(days, price)}" if price < base
+         else f"⭐ {escape(label)} — <b>{price}</b> {stars}{per_month(days, price)}")
+        for _, days, label, price, base in plan_offers())
+    if sale_active():
+        end = sale_settings()["end"]
+        if end:
+            from datetime import datetime
+            from common.formatting import get_tz
+            lines += "\n" + tr("🏷 <b>Endirim -{pct}%</b> — {date} tarixinədək", pct=sale_settings()["pct"],
+                               date=datetime.fromtimestamp(end, get_tz()).strftime("%d.%m.%Y %H:%M"))
+        else:
+            lines += "\n" + tr("🏷 <b>Endirim -{pct}%</b>", pct=sale_settings()["pct"])
     head = tr("⭐ <b>Uzatmaq üçün plan seç:</b>") if cur else tr("⭐ <b>Plan seç:</b>")
     return status, f"{head}\n{lines}", buy_keyboard(False)
 
@@ -612,6 +646,24 @@ def tip_message(bot_username: str, lang: str | None = None, group: bool = False)
         if group:
             return tip_group_text(), tip_group_keyboard(bot_username)
         return tip_text(bot_username), tip_message_keyboard()
+    finally:
+        i18n.reset(token)
+
+
+def premium_message(bot_username: str, lang: str | None = None, group: bool = False):
+    """Başqasına göndəriləcək 💎 Premium təklifi → (mətn, klaviatura). Alıcı Free kimi göstərilir.
+    group=True — qrup variantı: düymə botun şəxsi çatına (t.me/<bot>?start=premium) aparır."""
+    token = i18n.use(lang or i18n.default_lang())
+    try:
+        if group:
+            text = tr("💎 <b>DLLMaster Premium</b>\n\nMahnıları \"via\" yazısı olmadan, daha çox imkanla alın.\n\n"
+                      "👇 Düyməyə basın — bot şəxsi çatda planları göstərəcək.")
+            return text, InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text=tr("💎 Premium al"), url=f"https://t.me/{bot_username}?start=premium")]])
+        _, _, buy = premium_info(0)
+        rows = list(buy.inline_keyboard) if buy else []
+        rows.append([InlineKeyboardButton(text=tr("✖️ Bağla"), callback_data="tip_prompt:close")])
+        return premium_text(0, bot_username), InlineKeyboardMarkup(inline_keyboard=rows)
     finally:
         i18n.reset(token)
 

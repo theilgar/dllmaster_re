@@ -12,7 +12,12 @@ from html import escape
 from aiogram.types import InlineKeyboardMarkup
 
 from bot.core import panel
+from common.kv import next_of
 from bot.core.stars import (
+    SALE_PCTS,
+    discounted,
+    sale_active,
+    sale_settings,
     MAX_STARS,
     MIN_STARS,
     PLAN_MAP,
@@ -147,7 +152,50 @@ async def stars_panel(note: str = "") -> tuple[str, InlineKeyboardMarkup]:
         + (f"\n\n{note}" if note else "")
     )
     rows = [[_btn(f"{'⭐' if get_price(k) else '▫️'} {l}", f"st_plan:{k}")] for k, _, l in PLANS]
+    s = sale_settings()
+    rows.append([_btn(("🔥 Endirim: AKTİV" if sale_active() else "🏷 Endirim: " + ("planlaşdırılıb" if s["on"] else "söndürülüb"))
+                      + f" (-{s['pct']}%)", "st_sale")])
     rows.append(nav_row("biz"))
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _fmt_ts(ts) -> str:
+    if not ts:
+        return "—"
+    from datetime import datetime
+    from common.formatting import get_tz
+    return datetime.fromtimestamp(ts, get_tz()).strftime("%d.%m.%Y %H:%M")
+
+
+def sale_panel(note: str = "") -> tuple[str, InlineKeyboardMarkup]:
+    s = sale_settings()
+    if sale_active():
+        state = "🟢 <b>AKTİVDİR</b> — istifadəçilər endirimli qiyməti görür"
+    elif s["on"]:
+        now = time.time()
+        state = ("⏳ <b>Planlaşdırılıb</b> — başlama vaxtı gözlənilir" if s["start"] and now < s["start"]
+                 else "⌛ <b>Vaxtı bitib</b> — yeni tarix təyin et və ya söndür")
+    else:
+        state = "🔴 <b>Söndürülüb</b>"
+    prices = "\n".join(
+        f"   {escape(label)}: <s>{get_price(k)}</s> → <b>{discounted(get_price(k), s['pct'])}⭐</b>"
+        for k, _, label in PLANS if get_price(k)) or "   <i>satışda plan yoxdur</i>"
+    text = (crumb(SECTIONS["biz"], "⭐ Ulduz satışı", "🏷 Endirim") + "\n\n"
+            f"Vəziyyət: {state}\n"
+            f"📉 Endirim: <b>-{s['pct']}%</b> (bütün planlara)\n"
+            f"▶️ Başlama: <b>{_fmt_ts(s['start'])}</b>{'' if s['start'] else ' <i>(dərhal)</i>'}\n"
+            f"⏹ Bitmə: <b>{_fmt_ts(s['end'])}</b>{'' if s['end'] else ' <i>(müddətsiz)</i>'}\n\n"
+            f"💰 <b>Qiymətlər</b> (köhnə → yeni):\n{prices}\n\n"
+            "<i>Aktiv olanda /premium siyahısında köhnə qiymət üstündən xətt çəkilir, yeni qiymət yazılır; "
+            "ödəniş də endirimli qiymətlə olur. Vaxt: botun saat qurşağı.</i>"
+            + (f"\n\n{note}" if note else ""))
+    rows = [
+        [_btn("🔴 Söndür" if s["on"] else "🟢 Aç", "st_sale:tog"),
+         _btn(f"📉 -{s['pct']}%  ›  -{next_of(SALE_PCTS, s['pct'])}%", "st_sale:pct")],
+        [_btn("▶️ Başlama vaxtı", "st_sale:start"), _btn("⏹ Bitmə vaxtı", "st_sale:end")],
+        [_btn("⏱ İndən 1 gün", "st_sale:q:1"), _btn("3 gün", "st_sale:q:3"), _btn("7 gün", "st_sale:q:7")],
+        nav_row("st"),
+    ]
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 

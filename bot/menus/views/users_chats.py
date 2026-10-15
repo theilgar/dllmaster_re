@@ -199,6 +199,8 @@ async def user_card(uid: int, back: str) -> tuple[str, InlineKeyboardMarkup]:
             kb.append([_btn("💎 Premium ver", f"prm_gv:{uid}:{back}")])
         if u and not u["blocked"]:
             kb.append([_btn("☕ Bəxşiş mesajı göndər", f"tipmsg:u:{uid}:{back}")])
+            if not prem:
+                kb.append([_btn("💎 Premium təklifi göndər", f"premmsg:u:{uid}:{back}")])
     kb.append(nav_row(back))
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=kb)
 
@@ -330,6 +332,9 @@ async def chat_card(chat_id: int, back: str, live: bool = True) -> tuple[str, In
         tip_btn = _btn("☕ Bəxşiş mesajı göndər", f"tipmsg:c:{chat_id}:{back}")
         if not is_channel and len(tip_btn.callback_data.encode()) <= 64:
             kb.append([tip_btn])
+            prem_btn = _btn("💎 Premium təklifi göndər", f"premmsg:c:{chat_id}:{back}")
+            if len(prem_btn.callback_data.encode()) <= 64:
+                kb.append([prem_btn])
     ctx = get_context()
     if chat_id < 0 and len(f"hg:v:{chat_id}:{back}") <= 64:
         pool = getattr(ctx, "depo_helpers", None)

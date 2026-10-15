@@ -68,6 +68,8 @@ def setup(context):
         if not u or i18n.chosen(u.id):
             return False
         await asyncio.to_thread(get_db().set_setting, ASK_KEY.format(u.id), "1")   # hər yeni /start — loop-u tutmasın
+        with contextlib.suppress(Exception):
+            await message.delete()                      # istifadəçinin /start mesajı çatda yığılmasın
         await send_picker(message.chat.id, u.id, first=True)
         return True
 
@@ -96,7 +98,13 @@ def setup(context):
         parts = cb.data.split(":")
         if parts[1] == "menu":
             await cb.answer()
-            await send_picker(cb.message.chat.id, cb.from_user.id, first=False)
+            # köhnə mesajı (salam / panel) YENİ pəncərə açmadan seçiciyə çevir; mediadırsa — sil və yenisini göndər
+            try:
+                await cb.message.edit_text(_("🌐 Dil seçin:"), reply_markup=lang_keyboard(cb.from_user.id, "set"))
+            except Exception:
+                with contextlib.suppress(Exception):
+                    await cb.message.delete()
+                await send_picker(cb.message.chat.id, cb.from_user.id, first=False)
             return
         if parts[1] in ("set", "first") and len(parts) > 2 and parts[2] in i18n.LANGS:
             code = parts[2]

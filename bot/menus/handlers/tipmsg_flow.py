@@ -18,7 +18,7 @@ from bot.menus.state import bc, bc_reset, delete_preview, get_context, is_creato
 from bot.menus.views.base import TARGET_LABELS
 from bot.menus.views.broadcast import send_one
 from bot.menus.views.premium_stars import parse_user_ref
-from bot.menus.views.tipmsg import ask_group_view, ask_user_view, bot_username, result_text, tip_menu_view
+from bot.menus.views.tipmsg import ask_group_view, ask_user_view, bot_username, label, result_text, tip_menu_view
 from common.database import get_db
 from common.menu import _btn
 
@@ -26,14 +26,15 @@ logger = logging.getLogger(__name__)
 
 
 async def _payload(group: bool = False):
-    from bot.plugins.start_plugin import tip_message
-    return tip_message(await bot_username(), group=group)
+    from bot.plugins.start_plugin import premium_message, tip_message
+    fn = premium_message if tp.get("kind") == "prem" else tip_message
+    return fn(await bot_username(), group=group)
 
 
 async def _send_to(chat_id: int, group: bool = False) -> str:
-    from bot.plugins.compact_ui_plugin import raw
+    from bot.plugins.compact_ui_plugin import styled
     text, kb = await _payload(group)
-    with raw():                                   # 📋 Görünüş: istifadəçiyə / qrupa gedən mesaj kod blokuna çevrilməsin
+    with styled("user"):                          # 📋 Görünüş: istifadəçiyə / qrupa gedən mesaj seçilmiş üslubda (kod bloku / sitat)
         return await send_one(get_context().bot, get_db(), "group" if group else "user", chat_id, text, kb)
 
 
@@ -46,6 +47,7 @@ async def _mcb_tipmsg(cb: CallbackQuery, parts: list, action: str):
     """menu:tipmsg[:to | :prev | :bc:<free|users> | :u:<id>[:<geri>]]"""
     sub = parts[2] if len(parts) > 2 else ""
     ctx = get_context()
+    tp["kind"] = "prem" if action == "premmsg" else "tip"       # 💎 Premium təklifi və ya ☕ bəxşiş — eyni axın
 
     if sub == "":
         await cb.answer()
@@ -76,7 +78,7 @@ async def _mcb_tipmsg(cb: CallbackQuery, parts: list, action: str):
         status = await _send_to(chat_id, group=True)
         row = await asyncio.to_thread(get_db().get_chat, chat_id)
         note = result_text(status, f"<b>{escape((row or {}).get('title') or str(chat_id))}</b>", group=True)
-        await cb.answer("☕ Göndərildi" if status == "ok" else note.replace("<b>", "").replace("</b>", "")[:190])
+        await cb.answer("✅ Göndərildi" if status == "ok" else note.replace("<b>", "").replace("</b>", "")[:190])
         from bot.menus.views.users_chats import chat_card
         text, kb = await chat_card(chat_id, back, live=False)
         await safe_edit_cb(cb, f"{text}\n\n{note}", kb)
@@ -85,7 +87,8 @@ async def _mcb_tipmsg(cb: CallbackQuery, parts: list, action: str):
     if sub == "prev":                                         # creator-a eyni mesajı göndər (düymələr işləyir, özünə ödəniş olmur)
         await cb.answer()
         text, kb = await _payload()
-        with contextlib.suppress(Exception):
+        from bot.plugins.compact_ui_plugin import styled
+        with contextlib.suppress(Exception), styled("user"):
             await ctx.bot.send_message(cb.from_user.id, text, parse_mode="HTML", reply_markup=kb,
                                        disable_web_page_preview=True)
         return
@@ -96,7 +99,7 @@ async def _mcb_tipmsg(cb: CallbackQuery, parts: list, action: str):
         status = await _send_to(uid)
         u = await asyncio.to_thread(get_db().get_user, uid)
         note = result_text(status, _who(uid, u))
-        await cb.answer(note.replace("<code>", "").replace("</code>", "")[:190] if status != "ok" else "☕ Göndərildi")
+        await cb.answer(note.replace("<code>", "").replace("</code>", "")[:190] if status != "ok" else "✅ Göndərildi")
         from bot.menus.views.users_chats import user_card
         text, kb = await user_card(uid, back)
         await safe_edit_cb(cb, f"{text}\n\n{note}", kb)
@@ -130,7 +133,7 @@ async def _mcb_tipmsg(cb: CallbackQuery, parts: list, action: str):
         bc["preview_id"] = preview.message_id
         await safe_edit_cb(
             cb,
-            f"☕ <b>Bəxşiş mesajı</b> — {TARGET_LABELS[target]} (<b>{len(targets)}</b>)\n\n"
+            f"{label()} — {TARGET_LABELS[target]} (<b>{len(targets)}</b>)\n\n"
             "👇 <i>Aşağıdakı mesaj məhz belə göndəriləcək"
             + (" (qrupda ⭐ düyməsi botun şəxsi çatına aparır)." if target == "groups"
                else " (istifadəçilər ⭐ məbləğ düymələrini də görəcək).") + "</i>",

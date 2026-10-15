@@ -20,7 +20,7 @@ from common.database import get_db, is_creator
 from common.i18n import _ as tr
 from common.utilities import format_until
 from bot.core.stars import (
-    PLAN_MAP, get_price, make_payload, parse_payload,
+    PLAN_MAP, effective_price as get_price, make_payload, parse_payload,
     TIP_PLAN, MIN_STARS, MAX_STARS, make_tip_payload, parse_tip_payload,
 )
 

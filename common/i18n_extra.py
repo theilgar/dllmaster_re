@@ -405,3 +405,24 @@ EXTRA2 = {
     "\n\n...(davamı qısaldıldı)": _t("\n\n...(the rest was truncated)", "\n\n...(остальное сокращено)", "\n\n...(devamı kısaltıldı)"),
 }
 EXTRA.update({k: v for k, v in EXTRA2.items() if k not in EXTRA})
+
+EXTRA.update({
+    '💎 <b>DLLMaster Premium</b>\n\nMahnıları "via" yazısı olmadan, daha çox imkanla alın.\n\n👇 Düyməyə basın — bot şəxsi çatda planları göstərəcək.': _t(
+        '💎 <b>DLLMaster Premium</b>\n\nGet songs without the "via" caption and with more features.\n\n👇 Tap the button — the bot will show the plans in a private chat.',
+        '💎 <b>DLLMaster Premium</b>\n\nПолучайте песни без подписи "via" и с большим числом возможностей.\n\n👇 Нажмите кнопку — бот покажет планы в личном чате.',
+        '💎 <b>DLLMaster Premium</b>\n\nŞarkıları "via" yazısı olmadan, daha fazla özellikle alın.\n\n👇 Düğmeye basın — bot planları özel sohbette gösterecek.'),
+})
+for _k, _v in list(EXTRA.items()):
+    pass
+
+EXTRA.update({
+    "🏷 <b>Endirim -{pct}%</b> — {date} tarixinədək": _t(
+        "🏷 <b>Discount -{pct}%</b> — until {date}", "🏷 <b>Скидка -{pct}%</b> — до {date}", "🏷 <b>İndirim -{pct}%</b> — {date} tarihine kadar"),
+    "🏷 <b>Endirim -{pct}%</b>": _t("🏷 <b>Discount -{pct}%</b>", "🏷 <b>Скидка -{pct}%</b>", "🏷 <b>İndirim -{pct}%</b>"),
+})
+
+EXTRA.update({
+    "🔥 <b>Premium endirimi -{pct}%</b>": _t("🔥 <b>Premium discount -{pct}%</b>", "🔥 <b>Скидка на Premium -{pct}%</b>", "🔥 <b>Premium indirimi -{pct}%</b>"),
+    "{date} tarixinədək": _t("until {date}", "до {date}", "{date} tarihine kadar"),
+    "🔥 Premium -{pct}%": _t("🔥 Premium -{pct}%", "🔥 Premium -{pct}%", "🔥 Premium -%{pct}"),
+})

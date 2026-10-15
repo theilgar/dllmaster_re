@@ -1261,11 +1261,45 @@ class LoopWatchdog:
             if self._cur and lag < FREEZE_AT:
                 self._finish()
 
+    def _full_report(self) -> str:
+        """Donma anında: event loop-un TAM yığını, işləyən handler-lər, bütün thread-lərin yığını."""
+        try:
+            from bot.core import latency
+            run = ", ".join(f"{k} ({d:.1f}s)" for k, d in latency.inflight()[:8]) or "—"
+        except Exception:
+            run = "?"
+        lines = [f"işləyən handler-lər: {run}", "── event loop yığını ──"]
+        frames = sys._current_frames()
+        main = frames.get(self.loop_tid)
+        if main is not None:
+            lines += traceback.format_stack(main)[-14:]
+        lines.append("── digər thread-lər ──")
+        names = {t.ident: t.name for t in threading.enumerate()}
+        for tid, fr in frames.items():
+            if tid in (self.loop_tid, threading.get_ident()):
+                continue
+            st = traceback.extract_stack(fr)
+            own = [f for f in st if ROOT in os.path.abspath(f.filename) and "site-packages" not in f.filename]
+            f = (own or st)[-1]
+            lines.append(f"  {names.get(tid, tid)}: {os.path.basename(f.filename)}:{f.lineno} {f.name}")
+        return "\n".join(lines)
+
     def _finish(self):
         start, where = self._cur
         dur = time.monotonic() - start
         self._cur = None
         self.freezes.append((time.time(), dur, where))
+        rep = getattr(self, "_report", "")
+        if rep and dur >= 1.5:                       # bot_logs/freeze_<tarix>.txt — mənə göndərmək üçün
+            try:
+                os.makedirs(os.path.join(ROOT, "bot_logs"), exist_ok=True)
+                path = os.path.join(ROOT, "bot_logs", time.strftime("freeze_%Y%m%d.txt"))
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(f"\n===== {time.strftime('%H:%M:%S')} · {dur:.1f} san. · {where}\n{rep}\n")
+                if os.path.getsize(path) > 2_000_000:
+                    os.replace(path, path + ".old")
+            except OSError:
+                pass
         if dur >= 2:
             logger.warning(f"🫀 Bot {dur:.1f} san. dondu — {where}")
 
@@ -1277,6 +1311,7 @@ class LoopWatchdog:
             age = time.monotonic() - self.beat
             if age > FREEZE_AT + 0.2 and self._cur is None:
                 self._cur = (self.beat, self._where())
+                self._report = self._full_report()
 
     def _where(self) -> str:
         """Event loop thread-i hazırda harada ilişib — layihə fayllarından ən dərin sətir."""

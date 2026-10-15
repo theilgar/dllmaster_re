@@ -20,9 +20,18 @@ logger = logging.getLogger(__name__)
 SLOW_SECONDS = 3.0                      # bundan uzun çəkən (uzun-iş açarlarından başqa) WARNING ilə loglanır
 KEEP_PER_KEY = 200
 MAX_KEYS = 400
-LONG_OK = ("choice_", "dlstop", "df:", "va:", "mix", "bulk", "pl:", "dl")   # yükləmə / uzun əməliyyat önəkləri
+LONG_OK = ("choice_", "dlstop", "df:", "va:", "mix", "bulk", "pl:", "dl",       # yükləmə / uzun əməliyyat önəkləri
+           "/play", "/p", "/oynat", "/mixplay", "/mp", "/radio", "/tt", "/tiktok", "/shazam", "/vctest",
+           "ae:", "shz:", "tt:", "vj:", "vr:")     # handler işin bitməsini gözləyir (yükləmə, yayıma qoşulma, tanıma)
 
 _stats: dict[str, deque] = {}
+_inflight: dict = {}          # id -> (açar, başlama vaxtı) — hazırda işləyən handler-lər (donma hesabatı üçün)
+
+
+def inflight() -> list:
+    """[(açar, neçə saniyədir işləyir)] — ən uzun işləyən əvvəl."""
+    now = time.monotonic()
+    return sorted(((k, now - t0) for k, t0 in list(_inflight.values())), key=lambda x: -x[1])
 
 
 def key_of(event) -> str | None:
@@ -55,9 +64,13 @@ class LatencyMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         key = key_of(event)
         t = time.monotonic()
+        tok = object()
+        if key:
+            _inflight[id(tok)] = (key, t)
         try:
             return await handler(event, data)
         finally:
+            _inflight.pop(id(tok), None)
             if key:
                 dur = time.monotonic() - t
                 record(key, dur)
@@ -89,6 +102,26 @@ def snapshot(window: int = 3600, top: int = 3) -> dict:
         "max": max(all_vals, default=0.0),
         "slow": per[:top],
     }
+
+
+def detail(window: int = 3600) -> list:
+    """Bütün açarlar (uzun-iş olanlar da): [(açar, say, orta, p95, maks, son_vaxt, uzun_işdir)] — orta üzrə azalan."""
+    now = time.time()
+    out = []
+    for key, q in _stats.items():
+        vals = [(ts, d) for ts, d in q if now - ts <= window]
+        if not vals:
+            continue
+        ds = [d for _, d in vals]
+        out.append((key, len(ds), sum(ds) / len(ds), _pct(ds, 0.95), max(ds), now - vals[-1][0], _is_long_ok(key)))
+    out.sort(key=lambda r: r[2], reverse=True)
+    return out
+
+
+def reset() -> int:
+    n = sum(len(q) for q in _stats.values())
+    _stats.clear()
+    return n
 
 
 def summary_lines() -> list:

@@ -470,6 +470,7 @@ def com_view(note: str = "") -> tuple[str, InlineKeyboardMarkup]:
     rows = [
         [_btn("📢 Broadcast", "bc"), _btn("🎨 Mesaj şablonları", "ms")],
         [_btn("🔘 Start düymələri", "sbtn"), _btn("☕ Bəxşiş mesajı", "tipmsg")],
+        [_btn("💎 Premium təklifi", "premmsg")],
         nav_row("main"),
     ]
     return text, InlineKeyboardMarkup(inline_keyboard=rows)

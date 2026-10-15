@@ -562,6 +562,43 @@ async def stars_price_input(message: Message):
     logger.info("⭐ Qiymət dəyişdi: %s = %s", key, raw)
 
 
+# ── 🏷 Endirim vaxtı daxil edilməsi ──
+async def waiting_sale_time(message: Message) -> bool:
+    return str(stp.get("stage") or "").startswith("await_sale_") and is_creator(message.from_user.id)
+
+
+async def sale_time_input(message: Message):
+    from bot.core.stars import parse_sale_time, set_sale
+    from bot.menus.views.premium_stars import sale_panel
+    ctx = get_context()
+    which = stp["stage"].replace("await_sale_", "")
+    with contextlib.suppress(Exception):
+        await message.delete()
+    panel_args = dict(chat_id=stp["chat_id"], message_id=stp["panel_id"], parse_mode="HTML")
+    try:
+        ts = parse_sale_time(message.text)
+    except ValueError:
+        text, kb = sale_panel(f"❌ <b>{escape(message.text[:30])}</b> başa düşülmədi. "
+                              "Nümunə: <code>25.12.2026 18:00</code>, <code>18:00</code>, <code>+3g</code> və ya <code>-</code>")
+        await ctx.bot.edit_message_text(text=text, reply_markup=kb, **panel_args)
+        return
+    await asyncio.to_thread(set_sale, which, ts)
+    stp["stage"] = None
+    note = "✅ Saxlanıldı" + ("" if ts else " — məhdudiyyət yoxdur")
+    if which == "end" and ts:
+        s = sale_settings_snapshot()
+        if s["start"] and ts <= s["start"]:
+            note += "\n⚠️ Bitmə vaxtı başlamadan əvvəldir!"
+    text, kb = sale_panel(note)
+    with contextlib.suppress(Exception):
+        await ctx.bot.edit_message_text(text=text, reply_markup=kb, **panel_args)
+
+
+def sale_settings_snapshot():
+    from bot.core.stars import sale_settings
+    return sale_settings()
+
+
 # ── 👥 10. Qrup ID / Link daxil edilməsi ──
 async def waiting_grp_input(message: Message) -> bool:
     st = grp_inp.get(message.from_user.id)
@@ -728,6 +765,13 @@ def register_input_handlers(router: Router):
         F.text,
         ~F.text.startswith("/"),
         waiting_rec_input,
+    )
+    router.message.register(
+        sale_time_input,
+        F.chat.type == "private",
+        F.text,
+        ~F.text.startswith("/"),
+        waiting_sale_time,
     )
     router.message.register(
         stars_price_input,

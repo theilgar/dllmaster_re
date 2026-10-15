@@ -255,6 +255,7 @@ def perf_hub_view(note: str = "") -> tuple[str, InlineKeyboardMarkup]:
                     _btn(f"📦 Depo: {mx}{cp.depo_procs()}", "perf:pick:d"),
                 ]
             )
+    rows.append([panel.btn("⏱ Cavab müddəti — ətraflı", "menu:perf:lat")])
     t_btn = f"🧵 Thread: {cp.threads()}" + (f" ({t_act} aktiv)" if t_act else "")
     t_auto, n_auto = cp.threads_auto(), cp.nice_auto()
     if cp.turbo_on():
@@ -277,6 +278,28 @@ def perf_hub_view(note: str = "") -> tuple[str, InlineKeyboardMarkup]:
         nav_row("sys", refresh="perf"),
     ]
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def latency_detail_view(note: str = "") -> tuple[str, InlineKeyboardMarkup]:
+    from bot.core import latency
+    rows_ = latency.detail()
+    s = latency.snapshot()
+    lines = [crumb(SECTIONS["sys"], "⚙️ Performans", "⏱ Cavab müddəti (ətraflı)"), LINE,
+             f"Son 1 saat · <b>{sum(r[1] for r in rows_)}</b> sorğu · <b>{len(rows_)}</b> açar",
+             (f"Qısa cavablar: orta <b>{s['avg'] * 1000:.0f} ms</b> · p95 <b>{s['p95'] * 1000:.0f} ms</b> · "
+              f"maks <b>{s['max']:.1f} san.</b>") if s["count"] else "<i>Hələ ölçü yoxdur</i>",
+             "<i>⏳ — işin bitməsini gözləyən uzun əməliyyat (yükləmə, yayım, tanıma): xülasəyə daxil deyil.</i>", ""]
+    if rows_:
+        lines.append("<pre>açar                 say   orta    p95    maks   son")
+        for key, n, avg, p95, mx, ago, long_ in rows_[:25]:
+            name = (key[:19] + ("⏳" if long_ else "")).ljust(20)
+            lines.append(f"{name} {n:>4} {avg * 1000:>6.0f} {p95 * 1000:>6.0f} {mx * 1000:>7.0f} {ago / 60:>4.0f}d")
+        lines.append("</pre>")
+        lines.append("<i>vahid: ms; son — neçə dəqiqə əvvəl</i>")
+    if note:
+        lines.append(f"\n{note}")
+    rows = [[panel.btn("🗑 Statistikanı sıfırla", "menu:perf:latr")], nav_row("perf", refresh="perf:lat")]
+    return "\n".join(lines)[:4000], InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def perf_picker_view(key: str, note: str = "") -> tuple[str, InlineKeyboardMarkup]:

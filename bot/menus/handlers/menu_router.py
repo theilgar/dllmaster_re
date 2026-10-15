@@ -32,7 +32,7 @@ from bot.menus.handlers.group_pm_flow import handle_chat_users_action
 from bot.menus.handlers.performance_flow import _mcb_perf
 from bot.menus.handlers.settings_flow import handle_settings_action
 from bot.menus.handlers.spotify_flow import _mcb_sp
-from bot.menus.handlers.stars_flow import _mcb_st_p, _mcb_st_plan
+from bot.menus.handlers.stars_flow import _mcb_st_p, _mcb_st_plan, _mcb_st_sale
 from bot.menus.handlers.system_flow import handle_system_action
 from bot.menus.handlers.youtube_flow import (
     _mcb_dlf,
@@ -284,6 +284,7 @@ async def menu_callback(cb: CallbackQuery):
         "bc_s": lambda: _mcb_bc_send(cb),
         "bc_stop": lambda: _mcb_bc_stop(cb),
         "tipmsg": lambda: _mcb_tipmsg(cb, parts, action),
+        "premmsg": lambda: _mcb_tipmsg(cb, parts, action),
         "maint": lambda: _mcb_maint(cb, parts, action),
         "ads": lambda: _mcb_ads(cb, parts, action),
     }
@@ -468,6 +469,14 @@ async def menu_callback(cb: CallbackQuery):
         reset_inputs()
         text, kb = await stars_panel()
         await safe_edit_cb(cb, text, kb)
+
+    elif action == "st_sale":
+        if len(parts) <= 2:
+            await cb.answer()
+            from bot.menus.views.premium_stars import sale_panel
+            await safe_edit_cb(cb, *sale_panel())
+        else:
+            await _mcb_st_sale(cb, parts[1:], action)
 
     elif action in ("st_plan", "st_off", "st_set", "st_step"):
         await _mcb_st_plan(cb, parts, action)

@@ -63,9 +63,9 @@ async def run_broadcast():
     async def deliver(kind, chat_id):
         if markup is None:
             return await send_one(bot, db, kind, chat_id, text)
-        from bot.plugins.compact_ui_plugin import raw
-        with raw():                                  # 📋 Görünüş: istifadəçilərə gedən mesaj kod blokuna çevrilməsin
-            return await send_one(bot, db, kind, chat_id, text, markup)   # (panel redaktələri isə formatlanır)
+        from bot.plugins.compact_ui_plugin import styled
+        with styled("user"):                         # 📋 Görünüş: ☕ / 💎 mesajı seçilmiş üslubda (kod bloku / sitat)
+            return await send_one(bot, db, kind, chat_id, text, markup)
 
     for kind, chat_id in targets:
         if bc.get("stop"):
