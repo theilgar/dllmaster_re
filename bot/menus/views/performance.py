@@ -275,53 +275,18 @@ def perf_hub_view(note: str = "") -> tuple[str, InlineKeyboardMarkup]:
             _btn("⚡ Hovuz proseslərini yenilə", "perf:restart"),
         ],
         [_btn("⚡ Avto-tənzimlə", "perf:auto")],
-        [_btn(f"🌐 Uzaq server · {_remote_short()}", "perf:rmt")],
+        [panel.btn(f"🌐 Uzaq server {_remote_icon()}", "menu:rmt")],
         nav_row("sys", refresh="perf"),
     ]
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _remote_short() -> str:
+def _remote_icon() -> str:
     try:
         from bot.core import remote
-        return remote.status_line().split(" · ")[0].split(" (")[0]
+        return remote.status()[0]
     except Exception:
         return "?"
-
-
-def remote_view(note: str = "") -> tuple[str, InlineKeyboardMarkup]:
-    """🌐 Uzaq server: yükləmə / upload serverdə, bot evdə."""
-    from bot.core import cpu_pool as cp
-    from bot.core import remote
-    on, dl, up = remote.enabled(), remote.download_flag(), remote.upload_flag()
-    h = remote.host()
-    lines = [crumb(SECTIONS["sys"], "⚙️ Performans", "🌐 Uzaq server"), LINE,
-             f"Vəziyyət: <b>{escape(remote.status_line())}</b>",
-             f"Server: <code>{escape(h) if h else '—'}</code>:{remote.port()} · qovluq <code>{escape(remote.rdir())}</code>"
-             f" · açar: <code>{escape(remote.key()) if remote.key() else 'standart'}</code>",
-             f"⬇️ Yükləmə: <b>{'server' if dl else 'ev'}</b> · ⬆️ Upload: <b>{'server' if up and dl else 'ev'}</b>"
-             f" · paralel: <b>{remote.procs()}</b>",
-             f"İşləyən: ⬇️ {cp.REMOTE.running}/{cp.REMOTE.size} · ⬆️ {cp.REMOTE_UP.running}/{cp.REMOTE_UP.size}"
-             f" · bitən: {cp.REMOTE.stats['done']}/{cp.REMOTE_UP.stats['done']}"
-             f" · evə qayıdan (fallback): {remote.stats['fallback']}",
-             "",
-             "<i>Bot, baza, menyu, ffmpeg evdə qalır. Server əlçatmaz olsa iş avtomatik evdə görülür.\n"
-             "Brauzer cookies-i və localhost proxy olan yükləmələr həmişə evdə işləyir.</i>"]
-    if remote.PENDING:
-        lines.append(f"📎 Serverdə gözləyən fayl: {len(remote.PENDING)}")
-    if note:
-        lines.append(f"\n{note}")
-    rows = [
-        [panel.toggle("🌐 Uzaq server", on, "menu:perf:rmt:on")],
-        [_btn("✏️ Ünvan (user@ip)", "perf:rmt:ehost"), _btn("🔌 Port", "perf:rmt:eport"),
-         _btn("🔑 Açar", "perf:rmt:ekey")],
-        [panel.btn(f"⬇️ Yükləmə: {'🌐 server' if dl else '🏠 ev'}", "menu:perf:rmt:dl"),
-         panel.btn(f"⬆️ Upload: {'🌐 server' if up else '🏠 ev'}", "menu:perf:rmt:up")],
-        [_btn("➖", "perf:rmt:p-"), _btn(f"👥 Paralel: {remote.procs()}", "perf:rmt:info"), _btn("➕", "perf:rmt:p+")],
-        [_btn("🧪 Test", "perf:rmt:test"), _btn("🛠 Qur / yenilə", "perf:rmt:setup")],
-        nav_row("perf", refresh="perf:rmt"),
-    ]
-    return "\n".join(lines)[:4000], InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def latency_detail_view(note: str = "") -> tuple[str, InlineKeyboardMarkup]:

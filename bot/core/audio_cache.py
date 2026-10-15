@@ -515,17 +515,19 @@ async def _upload_to_depo(bot, file_path, filename: str, title: str, performer: 
                 if thread_id:
                     send_kw["message_thread_id"] = thread_id
                 msg = None
-                if remote.pending(file_path) and remote.upload_on():
+                if remote.pending(file_path):
                     try:                                         # 🌐 server → Telegram (ev bandwidth-i işləmir)
-                        msg = await remote.upload_audio(file_path, bot.token, chat_id, thread_id, filename, title,
-                                                        performer, duration, caption, thumb)
+                        msg = await remote.try_upload(file_path, bot.token, chat_id, thread_id, filename, title,
+                                                      performer, duration, caption, thumb)
                     except remote.RemoteUploadError as e:
                         raise RuntimeError(str(e))               # Telegram cavabı (flood / icazə) — aşağıdakı məntiq işləsin
-                    except remote.RemoteUnavailable as e:
-                        logger.info(f"🌐 Uzaq upload alınmadı ({e}) — fayl evə çəkilir")
+                    except remote.RemoteUnavailable as e:        # ✋ Manual: server gözləməsi bitdi — evə keçmirik
+                        logger.warning(f"🌐 Upload alınmadı: {e}")
+                        return None
                 if msg is None:
                     if not await remote.materialize(file_path):
                         return None
+                    remote.mark("up", "E")                       # 🏠 upload evdən
                     msg = await bot.send_audio(**send_kw)
                 # keşə yazma göndərmə ilə bir yerdədir: restart / ləğv arada olsa belə post bazaya düşür
                 return await asyncio.to_thread(save_from_message, video_id, msg, title, performer, duration,

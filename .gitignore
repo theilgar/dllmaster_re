@@ -64,3 +64,6 @@ data/audit_reports/
 data/.spotify_cache
 data/log_console.json
 data/va_records/
+
+# Serverə göndərilən YouTube cookies ixracı (həssas)
+data/remote_cookies/

@@ -19,6 +19,7 @@ from aiogram.types import (
 from bot.menus.handlers.audit_flow import _mcb_au
 from bot.menus.handlers.ads_flow import _mcb_ads
 from bot.menus.handlers.maint_flow import _mcb_maint
+from bot.menus.handlers.remote_flow import _mcb_remote
 from bot.menus.handlers.tipmsg_flow import _mcb_tipmsg
 from bot.menus.handlers.broadcast_flow import (
     _mcb_bc,
@@ -286,6 +287,7 @@ async def menu_callback(cb: CallbackQuery):
         "tipmsg": lambda: _mcb_tipmsg(cb, parts, action),
         "premmsg": lambda: _mcb_tipmsg(cb, parts, action),
         "maint": lambda: _mcb_maint(cb, parts, action),
+        "rmt": lambda: _mcb_remote(cb, parts, action),
         "ads": lambda: _mcb_ads(cb, parts, action),
     }
     if action in simple:

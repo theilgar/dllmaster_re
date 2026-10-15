@@ -9,6 +9,7 @@ from common.utilities import fetch_telegram_thumb, format_duration, sanitize_fil
 from bot.core.youtube_handler import YoutubeManager, DownloadCancelled
 from bot.core import youtube_handler as yt_handler
 from bot.core import audio_cache
+from bot.core import remote
 from common import activity          # 📡 canlı monitor (/depotop) üçün istifadəçi yükləmələri
 from bot.core import song_names
 from bot.core import inline_settings as IS
@@ -927,7 +928,7 @@ def setup(context):
         size = 0
         if res.get("path"):
             with contextlib.suppress(OSError):
-                size = os.path.getsize(res["path"])
+                size = remote.file_size(res["path"])
         name = f"{res.get('artist')} - {res.get('track')}" if res.get("artist") else None
         activity.end(tok, "cached" if res.get("cached") else ("done" if res.get("file_id") or size else "failed"),
                      size, name)
@@ -998,7 +999,7 @@ def setup(context):
                     url, sanitize_filename(yt_title), cancel_event=cancel_event, on_progress=on_progress
                 )
                 with contextlib.suppress(OSError):          # 📶 sürət: YouTube → server
-                    activity.stage("DL", dl_bytes=os.path.getsize(path), dl_secs=time.time() - t_dl)
+                    activity.stage("DL", dl_bytes=remote.file_size(path), dl_secs=time.time() - t_dl)
             sl = await sl_task
             if cancel_event.is_set():
                 with contextlib.suppress(OSError):
@@ -1035,7 +1036,7 @@ def setup(context):
                                                            yt_title=yt_title, source=source)
                 with contextlib.suppress(OSError):              # 📶 sürət: server → depo (Telegram)
                     if file_id:
-                        activity.stage("UP", up_bytes=os.path.getsize(path), up_secs=time.time() - t_up)
+                        activity.stage("UP", up_bytes=remote.file_size(path), up_secs=time.time() - t_up)
                 if not file_id and need_file_id and fallback_chat:
                     # depo əlçatan deyil — inline üçün file_id mütləq lazımdır
                     msg = await bot.send_audio(

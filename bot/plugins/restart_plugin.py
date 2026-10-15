@@ -119,6 +119,8 @@ def get_active_operations(context) -> dict:
                 s_name = getattr(st, "title", None) or str(cid)
                 live_streams.append(f"{s_name}: {t_title}{q_note}")
 
+    # ⏳ Canlı yayım: cari mahnı bitənə qədər gözlənilir (st.current). Növbədəkilər başlamır (bot/voice/engine.py
+    # _hold_for_restart) — restartdan sonra avtomatik davam edir, ona görə gözləmə uzanmır.
     is_busy = bool(total_dl or live_streams)
     return {
         "downloads": downloads,
@@ -223,6 +225,9 @@ async def _graceful_restart_loop(context, chat_id: int, message_id: int, update_
             if _CANCEL_RESTART:
                 _RESTART_PENDING = False
                 _CANCEL_RESTART = False
+                if va:
+                    with contextlib.suppress(Exception):
+                        await va.release_holds()                # ⏳ saxlanmış yayımlar qaldığı yerdən davam etsin
                 with contextlib.suppress(Exception):
                     await context.bot.edit_message_text(
                         chat_id=chat_id,
@@ -451,8 +456,9 @@ def setup(context):
                 lines.append(f"• 🎙 Canlı yayım: <b>{active['stream_count']}</b> qrupda musiqi oxunur\n{stream_details}")
             lines.extend([
                 "",
-                "<i>💡 Yükləmələr və canlı yayımdakı mahnı bitdikdən sonra avtomatik restart üçün <b>Bitdikdə Restart Et</b> seçin.</i>\n",
-                "<i>Dərhal restart etmək üçün: <code>/restart now</code></i>",
+                "<i>💡 <b>Bitdikdə Restart Et</b> — yükləmələr və yayımdakı <u>cari</u> mahnı bitəndə restart olur; "
+                "yayımın növbəsi restartdan sonra avtomatik davam edir (yeni /play əlavə etmək olar).</i>",
+                "<i>⚡ Dərhal: <code>/restart now</code> — yayım 20–40 san. kəsilir, sonra avtomatik bərpa olunur.</i>",
             ])
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [

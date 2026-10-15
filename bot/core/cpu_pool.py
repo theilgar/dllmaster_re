@@ -821,12 +821,15 @@ LANES = {
     "user": ProcPool("user", "👤 İstifadəçi", user_procs()),
     "depo": ProcPool("depo", "📦 Depo", depo_procs()),
 }
-REMOTE = RemoteProcPool("remote", "🌐 Uzaq yükləmə", 2)         # yt-dlp serverdə (ölçü: remote:procs)
+REMOTE_LANES = {                                                  # yt-dlp serverdə — zolaqlar ayrı (slot sayı: remote.depo_slots() və user_slots())
+    "user": RemoteProcPool("remote_user", "🌐 Uzaq 👤 istifadəçi", 2),
+    "depo": RemoteProcPool("remote_depo", "🌐 Uzaq 📦 depo", 2),
+}
 REMOTE_UP = RemoteProcPool("remote_up", "🌐 Uzaq upload", 2)    # serverdən Telegram-a upload
 
 
 async def shutdown_pools():
-    for p in (*LANES.values(), REMOTE, REMOTE_UP):
+    for p in (*LANES.values(), *REMOTE_LANES.values(), REMOTE_UP):
         await p.shutdown()
 
 
@@ -858,21 +861,15 @@ def _lane() -> str:
 
 async def _run(name: str, args: tuple, timeout: float, cancel_event=None, cancel_path=None):
     from bot.core import remote, ytdl_worker
-    if name == "ytdl_download" and remote.download_on():
-        try:
-            return await remote.download(args, timeout, cancel_event, cancel_path, _lane())
-        except remote.RemoteLocalOnly as e:
-            logger.debug(f"🌐 Bu yükləmə evdə: {e}")
-        except remote.RemoteUnavailable as e:
-            if _STOPPING:
-                raise asyncio.CancelledError("bot dayanır") from e
-            remote.stats["fallback"] += 1
-            if not remote.down_info()[0]:                 # server işləyir, amma bu iş alınmadı — bir dəfəlik fallback
-                logger.warning(f"🌐 Uzaq yükləmə alınmadı: {e} — evdə yüklənir")
-            else:
-                logger.info("🌐 Server dayanıb — evdə yüklənir")
+    lane = _lane()
+    if name == "ytdl_download" and remote.server_selected("download"):
+        res = await remote.try_download(args, timeout, cancel_event, cancel_path, lane)    # ✋ Manual: xətada gözləyir
+        if res is not None:
+            return res
+    if name == "ytdl_download":
+        remote.mark("dl", "E")                            # 🏠 ev (rejim ev / server dolu / fallback)
     if mode() == "process":
-        pool = LANES[_lane()]
+        pool = LANES[lane]
         try:
             return await pool.call(name, args, timeout, cancel_event, cancel_path)
         except WorkerCrashed as e:

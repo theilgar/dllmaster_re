@@ -32,8 +32,9 @@ async def _mcb_perf(cb: CallbackQuery, parts: list, action: str):
     sub = parts[2] if len(parts) > 2 else ""
     arg = parts[3] if len(parts) > 3 else ""
     note = ""
-    if sub == "rmt":
-        await _mcb_remote(cb, arg)
+    if sub == "rmt":                                      # köhnə menu:perf:rmt:* düymələri → 🌐 Uzaq server paneli
+        from bot.menus.handlers.remote_flow import _mcb_remote
+        await _mcb_remote(cb, ["menu", "rmt", *parts[3:]])
         return
     if sub == "pick" and arg in PERF_PICK_CONFIG:
         perf_inp["stage"] = None
@@ -231,81 +232,3 @@ async def _mcb_perf(cb: CallbackQuery, parts: list, action: str):
     else:
         await cb.answer()
     await safe_edit_cb(cb, *perf_hub_view(note))
-
-
-# ── 🌐 Uzaq server (bot/core/remote.py) ──
-_RMT_PROMPTS = {
-    "host": ("✏️ Server ünvanı", "<code>istifadəçi@ip</code> yazın (məs. <code>root@203.0.113.5</code>). "
-             "Boş göndərmək üçün <b>-</b> yazın.\n<i>Evdən bu serverə parolsuz (SSH açarı ilə) qoşula bilməlisiniz: "
-             "<code>ssh-copy-id istifadəçi@ip</code></i>"),
-    "port": ("🔌 SSH portu", "Rəqəm yazın (standart: <code>22</code>)."),
-    "key": ("🔑 SSH açar faylı", "Açarın yolunu yazın (məs. <code>~/.ssh/id_ed25519</code>). "
-            "Standart açarlar üçün <b>-</b> yazın."),
-}
-
-
-async def _mcb_remote(cb: CallbackQuery, arg: str):
-    from bot.core import remote
-    from bot.menus.views.performance import remote_view
-
-    note = ""
-    if arg.startswith("e") and arg[1:] in _RMT_PROMPTS:
-        what = arg[1:]
-        title, hint = _RMT_PROMPTS[what]
-        perf_inp.update(stage="await_val", key=f"rmt_{what}", chat_id=cb.message.chat.id,
-                        panel_id=cb.message.message_id)
-        await cb.answer()
-        await safe_edit_cb(cb, crumb(SECTIONS["sys"]) + f" › 🌐 <b>Uzaq server › {title}</b>\n" + LINE + "\n" + hint,
-                           InlineKeyboardMarkup(inline_keyboard=[[_btn("✖️ Ləğv et", "perf:rmt")]]))
-        return
-    perf_inp["stage"] = None
-    if arg == "on":
-        if not remote.enabled() and not remote.configured():
-            await cb.answer("Əvvəl server ünvanını daxil edin", show_alert=True)
-            return
-        on = remote._S.toggle("on")
-        remote.mark_up()
-        await cb.answer("🌐 Açıldı" if on else "⚪ Söndürüldü — hər şey evdə")
-    elif arg == "dl":
-        v = remote._S.toggle("download", "1")
-        await cb.answer("⬇️ Yükləmə serverdə" if v else "⬇️ Yükləmə evdə (upload da evdə olacaq)")
-    elif arg == "up":
-        v = remote._S.toggle("upload", "1")
-        await cb.answer("⬆️ Upload serverdən" if v else "⬆️ Upload evdən")
-    elif arg in ("p+", "p-"):
-        n = remote._S.int("procs", 2, lo=1, hi=4) + (1 if arg == "p+" else -1)
-        remote._S.put("procs", max(1, min(4, n)))
-        await cb.answer(f"👥 Paralel: {remote.procs()}")
-    elif arg == "info":
-        await cb.answer("Serverdə eyni anda neçə yükləmə / upload getsin. 2 GB RAM üçün 1–2 məsləhətdir.", show_alert=True)
-        return
-    elif arg == "test":
-        await cb.answer("🧪 Yoxlanılır...")
-        res = await remote.check()
-        if res["ok"]:
-            i = res["info"]
-            note = (f"✅ <b>Server işləyir</b> · RAM {i.get('ram_mb')} MB · boş disk {i.get('free_mb')} MB · "
-                    f"yt-dlp {i.get('yt_dlp')} · JS: {', '.join(i.get('js') or []) or '❌ yoxdur'} · "
-                    f"ffmpeg: {'✅' if i.get('ffmpeg') else '—'}")
-            if not i.get("js"):
-                note += "\n⚠️ <i>YouTube üçün serverdə deno və ya node lazımdır (sudo apt install nodejs)</i>"
-        else:
-            note = f"❌ {escape_html(res['error'])}"
-    elif arg == "setup":
-        if not remote.configured():
-            await cb.answer("Əvvəl server ünvanını daxil edin", show_alert=True)
-            return
-        await cb.answer("🛠 Qurulur (1–3 dəq.)...")
-        await safe_edit_cb(cb, *remote_view("⏳ <b>Server qurulur</b> — yt-dlp və aiogram yüklənir, gözləyin..."))
-        try:
-            note = escape_html("\n".join(await remote.setup()))
-        except remote.RemoteUnavailable as e:
-            note = f"❌ {escape_html(str(e))}"
-    else:
-        await cb.answer()
-    await safe_edit_cb(cb, *remote_view(note))
-
-
-def escape_html(text: str) -> str:
-    from html import escape
-    return escape(text)

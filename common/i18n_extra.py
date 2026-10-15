@@ -110,6 +110,14 @@ EXTRA = {
         "✅ <b>The queue is finished</b>\nAdd a new song with /play",
         "✅ <b>Очередь закончилась</b>\nДобавьте новую песню через /play",
         "✅ <b>Sıra bitti</b>\n/play ile yeni şarkı ekle"),
+    "⏳ <b>Bot restart olunur.</b>\nNövbədəki <b>{n}</b> mahnı restartdan sonra avtomatik davam edəcək.": _t(
+        "⏳ <b>The bot is restarting.</b>\n<b>{n}</b> songs in the queue will continue automatically after the restart.",
+        "⏳ <b>Бот перезапускается.</b>\nПесни в очереди (<b>{n}</b>) продолжатся автоматически после перезапуска.",
+        "⏳ <b>Bot yeniden başlatılıyor.</b>\nSıradaki <b>{n}</b> şarkı yeniden başlatmadan sonra otomatik devam edecek."),
+    "♻️ <b>Bot yenidən başladı — yayım bərpa olundu.</b>": _t(
+        "♻️ <b>The bot restarted — the stream was restored.</b>",
+        "♻️ <b>Бот перезапущен — эфир восстановлен.</b>",
+        "♻️ <b>Bot yeniden başladı — yayın geri yüklendi.</b>"),
     "✅ <b>Səsli yayım və növbə uğurla bərpa olundu!</b>": _t(
         "✅ <b>The voice stream and queue were restored!</b>",
         "✅ <b>Голосовой эфир и очередь успешно восстановлены!</b>",

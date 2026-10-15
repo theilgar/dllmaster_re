@@ -74,6 +74,8 @@ from bot.voice.models import (
 from common.i18n import _ as tr
 from common.utilities import format_duration as fmt_dur, spawn, ui_styled
 
+PLANNED_FLAG = os.path.join("data", "voice_planned_restart")      # planlı restart: açılışda yayım avtomatik bərpa olunur
+
 API_ID = os.getenv("TELETHON_API_ID")
 API_HASH = os.getenv("TELETHON_API_HASH")
 
@@ -541,6 +543,10 @@ class Assistant:
             if for_restart:
                 self.rec.save_all()                       # ⏺ növbəti başlanğıcda recover() bitirəcək
                 self.save_active_sessions(now=True)
+                if any(st.current or st.queue for st in self.chats.values()):
+                    with contextlib.suppress(OSError):    # ♻️ planlı restart: açılışda yayım düyməsiz avtomatik bərpa olunur
+                        with open(PLANNED_FLAG, "w", encoding="utf-8") as f:
+                            f.write(str(time.time()))
                 for sl in self.slots:
                     if sl.calls:
                         with contextlib.suppress(Exception):
@@ -1256,7 +1262,9 @@ class Assistant:
                 st.title = title
         return st
 
-    async def enqueue(self, chat_id: int, title: str, t: Track, progress=None) -> tuple:
+    async def enqueue(self, chat_id: int, title: str, t: Track, progress=None, front: bool = False) -> tuple:
+        """front=True (🔀 Mixplay açıqkən istifadəçi /play): mahnı Mix mahnılarının ÖNÜNƏ düşür — digər istifadəçi
+        mahnılarından sonra (onların sırası qorunur), amma avtomatik Mix tracklərindən əvvəl."""
         st = self.state(chat_id, title)
         if st.idle_task:
             st.idle_task.cancel()
@@ -1267,17 +1275,26 @@ class Assistant:
                     await progress(tr("📦 Depoda yoxdur — depoya yüklənir..."))
             await self.ensure_depo(t)
         async with st.lock:
-            if st.current is None:
+            if st.current is None and not st.held:
                 try:
                     await self._play(st, t, progress)
                 except Exception:
                     self._drop_file(t)
                     raise
                 return "playing", 0
-            st.queue.append(t)
+            if front:
+                pos = 0
+                for q in st.queue:
+                    if q.src == "mix":
+                        break
+                    pos += 1
+                st.queue.insert(pos, t)
+            else:
+                st.queue.append(t)
+                pos = len(st.queue) - 1
             self.prefetch(st.queue[0])
             self.save_active_sessions()
-            return "queued", len(st.queue)
+            return "queued", pos + 1
 
     async def _play(self, st: ChatState, t: Track, progress=None):
         if not self.running or getattr(st, "stopped", False) or st.chat_id not in self.chats:
@@ -1474,6 +1491,9 @@ class Assistant:
                 return
             st.play_task = asyncio.current_task()
             try:
+                if not skipped and st.queue and self._restart_pending() and not getattr(st, "stopped", False):
+                    await self._hold_for_restart(st)          # ⏳ restart gözlənilir: növbə restartdan sonra davam edəcək
+                    return
                 if not st.queue and st.radio and not getattr(st, "stopped", False):
                     await self.refill(st)                     # ♾ Mix — növbə bitib, yenisini gətir
                 while st.queue and not getattr(st, "stopped", False) and chat_id in self.chats:
@@ -1515,6 +1535,50 @@ class Assistant:
             finally:
                 if getattr(st, "play_task", None) is asyncio.current_task():
                     st.play_task = None
+
+    @staticmethod
+    def _restart_pending() -> bool:
+        try:
+            from bot.plugins.restart_plugin import is_restart_pending
+            return is_restart_pending()
+        except Exception as e:
+            logger.debug("restart vəziyyəti oxunmadı: %r", e)
+            return False
+
+    async def _hold_for_restart(self, st: ChatState):
+        """⏳ «Bitdikdə restart»: cari mahnı bitdi. Növbədəkilər başlamır — saxlanılır, restartdan sonra avtomatik davam edir.
+        (Əks halda yayım və növbə sonsuz uzanıb restartı gecikdirərdi.) Restart ləğv olunsa — release_holds() davam etdirir."""
+        if st.current:
+            self._drop_file(st.current)
+        st.current = None
+        st.held = True
+        self.rec.on_track_end(st.chat_id)
+        if st.ticker_task and not st.ticker_task.done():
+            st.ticker_task.cancel()
+            st.ticker_task = None
+        self.save_active_sessions(now=True)
+        logger.info(f"🎙 ⏳ Restart gözlənilir — {st.chat_id}: {len(st.queue)} mahnı restartdan sonra davam edəcək")
+        with contextlib.suppress(Exception):
+            with ui_styled("voice"):
+                note = await self.ctx.bot.send_message(
+                    st.chat_id,
+                    tr("⏳ <b>Bot restart olunur.</b>\nNövbədəki <b>{n}</b> mahnı restartdan sonra avtomatik davam edəcək.",
+                       n=len(st.queue)), parse_mode="HTML")
+            spawn(self._delete_later(note, 20))
+
+    @staticmethod
+    async def _delete_later(msg, delay: float):
+        await asyncio.sleep(delay)
+        with contextlib.suppress(Exception):
+            await msg.delete()
+
+    async def release_holds(self):
+        """Restart ləğv olundu — saxlanmış yayımlar qaldığı yerdən davam edir."""
+        for cid, st in list(self.chats.items()):
+            if getattr(st, "held", False):
+                st.held = False
+                if st.current is None and st.queue:
+                    spawn(self.next(cid))
 
     async def _idle_leave(self, chat_id):
         await asyncio.sleep(IDLE_LEAVE)
@@ -1774,8 +1838,122 @@ class Assistant:
 
         self._sess_task = loop.create_task(_later())
 
+    # ── ♻️ restartdan sonra avtomatik bərpa ──
+    AUTO_RESUME_MAX_AGE = 600           # planlı restartdan bu qədər saniyə keçməyibsə — avtomatik bərpa
+
+    @staticmethod
+    def _planned_restart() -> bool:
+        """Planlı restart bayrağı təzədirmi (stop(for_restart) yazır; köhnə qalıq çökmədən sonra səhvən işə düşməsin)."""
+        try:
+            with open(PLANNED_FLAG, encoding="utf-8") as f:
+                return time.time() - float(f.read().strip() or 0) < Assistant.AUTO_RESUME_MAX_AGE
+        except (OSError, ValueError):
+            return False
+
+    def prepare_recovery(self):
+        """Açılışın əvvəlində (asistan başlamamış, mesajlar emal olunmazdan öncə) çağırılır: planlı restartdan sonra
+        bərpa olunacaq qrupları qeyd edir. Bu qruplara gələn /skip, /end, /play komandaları bərpa bitənə qədər gözləyir
+        (restart zamanı yazılmış komandalar Telegram-da saxlanılır və açılışdan sonra gəlir)."""
+        self._recover_events = {}
+        if not self._planned_restart():
+            return
+        try:
+            with open(SESSIONS_FILE, encoding="utf-8") as f:
+                sessions = json.load(f)
+        except (OSError, ValueError):
+            return
+        now = time.time()
+        for k, v in sessions.items():
+            if now - v.get("saved_at", 0) < self.AUTO_RESUME_MAX_AGE and (v.get("current") or v.get("queue")):
+                self._recover_events[int(k)] = asyncio.Event()
+
+    async def wait_resumed(self, chat_id: int, timeout: float = 45.0):
+        """Qrup restartdan sonra bərpa olunur — bitənə qədər gözləyir (komanda boş vəziyyətə düşməsin)."""
+        ev = getattr(self, "_recover_events", {}).get(chat_id)
+        if ev is not None and not ev.is_set():
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(ev.wait(), timeout)
+
+    @staticmethod
+    def _track_from(d: dict) -> Track:
+        return Track(d["title"], d.get("vid"), d.get("url"), d.get("duration") or 0, d.get("file_id"),
+                     d.get("by") or "Bərpa", depo=bool(d.get("file_id")),
+                     src="depo" if d.get("file_id") else "yt", user_id=d.get("user_id"), track_id=d.get("track_id"))
+
+    async def restore_chat(self, chat_id: int, data: dict) -> bool:
+        """Saxlanmış yayımı qaytarır: oxunan mahnı yenidən başlayır, növbə olduğu kimi bərpa olunur."""
+        cur = data.get("current")
+        queue = list(data.get("queue") or [])
+        first = cur or (queue.pop(0) if queue else None)
+        if not first:
+            return False
+        await self.enqueue(chat_id, data.get("title") or "", self._track_from(first))
+        st = self.chats.get(chat_id)
+        if not st:
+            return False
+        for q in queue:
+            st.queue.append(self._track_from(q))
+        if st.queue:
+            self.prefetch(st.queue[0])
+        self.save_active_sessions()
+        await self.refresh_np(st)
+        return True
+
+    async def _ask_recovery(self, chat_id: int, data: dict):
+        cur = data.get("current")
+        queue = data.get("queue") or []
+        lines = [
+            tr("⚠️ <b>Bot yenidən başladıldı</b>"),
+            "",
+            tr("📻 <i>Restartdan əvvəl səsli yayımda mahnılar var idi:</i>"),
+        ]
+        if cur:
+            lines.append(f"🎙 <b>Son oxunan:</b> <code>{escape(cur['title'])}</code>")
+        if queue:
+            lines.append(f"\n📋 <b>Növbədə:</b> {len(queue)} mahnı")
+            for i, q in enumerate(queue[:4], 1):
+                lines.append(f"{i}. {escape(q['title'])}")
+            if len(queue) > 4:
+                lines.append(tr("<i>... və daha {n} mahnı</i>", n=len(queue) - 4))
+        lines.append("")
+        lines.append(tr("<i>Səsli yayım təkrar açılsın və növbə bərpa edilsin?</i>"))
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=tr("▶️ Yayımı bərpa et"), callback_data=f"vr:resume:{chat_id}"),
+            InlineKeyboardButton(text=tr("✖️ Ləğv et"), callback_data=f"vr:dismiss:{chat_id}"),
+        ]])
+        with contextlib.suppress(Exception):
+            await self.ctx.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML", reply_markup=kb)
+
+    async def _auto_restore(self, items: dict):
+        sem = asyncio.Semaphore(3)
+
+        async def one(str_cid: str, data: dict):
+            cid = int(str_cid)
+            ok = False
+            try:
+                async with sem:
+                    ok = await self.restore_chat(cid, data)
+            except Exception as e:
+                logger.warning(f"🎙 Avtomatik bərpa alınmadı ({cid}): {e}")
+            finally:
+                ev = getattr(self, "_recover_events", {}).get(cid)
+                if ev is not None:
+                    ev.set()                                   # gözləyən /skip /play komandaları davam etsin
+            if ok:
+                logger.info(f"🎙 ♻️ Yayım avtomatik bərpa olundu ({cid})")
+                with contextlib.suppress(Exception):
+                    note = await self.ctx.bot.send_message(
+                        cid, tr("♻️ <b>Bot yenidən başladı — yayım bərpa olundu.</b>"), parse_mode="HTML")
+                    await asyncio.sleep(10)
+                    await note.delete()
+            else:
+                self._pending_recoveries[str_cid] = data       # alınmadı — əvvəlki kimi düymə ilə
+                await self._ask_recovery(cid, data)
+
+        await asyncio.gather(*(one(k, v) for k, v in items.items()))
+
     async def check_restart_recovery(self):
-        """Restartdan sonra növbədə qalmış mahnılar üçün qrupa bərpa təsdiqi göndərir."""
+        """Restartdan sonra: planlı restartdırsa yayım avtomatik bərpa olunur; deyilsə (çökmə) qrupa təsdiq göndərilir."""
         if not os.path.exists(SESSIONS_FILE):
             return
         try:
@@ -1785,41 +1963,28 @@ class Assistant:
             sessions = {}
         with contextlib.suppress(Exception):
             os.remove(SESSIONS_FILE)
+        planned = self._planned_restart()
+        with contextlib.suppress(OSError):
+            os.remove(PLANNED_FLAG)
 
         now = time.time()
         valid = {k: v for k, v in sessions.items() if now - v.get("saved_at", 0) < 3600 * 3}
         if not valid:
             return
-        self._pending_recoveries = valid
-        bot = self.ctx.bot
+        self._pending_recoveries = {}
+        auto = {}
         for str_cid, data in valid.items():
-            chat_id = int(str_cid)
-            cur = data.get("current")
-            queue = data.get("queue") or []
-            if not cur and not queue:
+            if not (data.get("current") or data.get("queue")):
                 continue
-            lines = [
-                tr("⚠️ <b>Bot yenidən başladıldı</b>"),
-                "",
-                tr("📻 <i>Restartdan əvvəl səsli yayımda mahnılar var idi:</i>"),
-            ]
-            if cur:
-                lines.append(f"🎙 <b>Son oxunan:</b> <code>{escape(cur['title'])}</code>")
-            if queue:
-                lines.append(f"\n📋 <b>Növbədə:</b> {len(queue)} mahnı")
-                for i, q in enumerate(queue[:4], 1):
-                    lines.append(f"{i}. {escape(q['title'])}")
-                if len(queue) > 4:
-                    lines.append(tr("<i>... və daha {n} mahnı</i>", n=len(queue) - 4))
-            lines.append("")
-            lines.append(tr("<i>Səsli yayım təkrar açılsın və növbə bərpa edilsin?</i>"))
-
-            kb = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text=tr("▶️ Yayımı bərpa et"), callback_data=f"vr:resume:{chat_id}"),
-                InlineKeyboardButton(text=tr("✖️ Ləğv et"), callback_data=f"vr:dismiss:{chat_id}"),
-            ]])
-            with contextlib.suppress(Exception):
-                await bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML", reply_markup=kb)
+            if planned and int(str_cid) in getattr(self, "_recover_events", {}):
+                auto[str_cid] = data
+            else:
+                self._pending_recoveries[str_cid] = data
+        for str_cid, data in list(self._pending_recoveries.items()):
+            await self._ask_recovery(int(str_cid), data)
+        if auto:
+            logger.info(f"🎙 ♻️ Planlı restart: {len(auto)} yayım avtomatik bərpa olunur")
+            await self._auto_restore(auto)
 
     async def reload_chat(self, chat_id: int):
         """Səsli söhbət axınını hot-reconnect edir, növbəni saxlayır."""

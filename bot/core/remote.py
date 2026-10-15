@@ -1,18 +1,25 @@
 """
 🌐 Uzaq server — bot/core/remote.py
 
-Əsas bot (menyu, baza, ffmpeg, Shazam...) evdə qalır; yükləmə (yt-dlp) və depoya upload uzaq serverdə işləyir.
-Nəqliyyat — adi SSH (əlavə proqram / port yoxdur): server tərəfdə yalnız bot/core/ytdl_worker.py işləyir və evdəki
-işçi proseslə eyni protokolla (stdin/stdout) danışır → cpu_pool.RemoteProcPool.
+Bot (menyu, baza, ffmpeg, Shazam...) evdə qalır; yükləmə (yt-dlp) və depoya upload istəsəniz uzaq serverdə görülür.
+Nəqliyyat — adi SSH (əlavə proqram / port yoxdur): serverdə yalnız bot/core/ytdl_worker.py işləyir və evdəki işçi
+proseslə eyni protokolla (stdin/stdout) danışır → cpu_pool.RemoteProcPool.
 
-  ⬇️ Yükləmə  — yt-dlp serverdə işləyir (serverin IP-si). Nəticə:
+İki sual, hər biri üçün üç cavab:
+  ⬇️ Yükləmə / ⬆️ Upload harada getsin?   🏠 ev · 🌐 server · 🏠+🌐 ikisi (server boşdursa orada, dolu olanda evdə)
+  🛟 Server xətası olsa nə olsun?          ✋ Manual (standart): iş evə keçmir, gözləyir, creator-a düymələrlə bildiriş gedir
+                                           🤖 Avto: iş dərhal evdə görülür
+
+Necə işləyir:
+  ⬇️ Yükləmə — yt-dlp serverdə işləyir. Nəticə:
        • ev fayla toxunacaqsa (ffmpeg, istifadəçiyə göndərmə) — fayl ssh ilə evə çəkilir;
        • 📦 depo zolağında hazır .m4a-dırsa — fayl serverdə QALIR, evdə boş yer-tutan fayl yaranır (PENDING).
-  ⬆️ Upload   — PENDING fayl serverdən birbaşa Telegram-a yüklənir (ev bandwidth-i işləmir).
-       Server alınmasa fayl evə çəkilir (materialize) və adi yolla göndərilir.
+  ⬆️ Upload — PENDING fayl serverdən birbaşa Telegram-a yüklənir (ev internetini işlətmir).
+  Server üçün uyğun olmayan işlər (brauzer cookies-i, localhost proxy) həmişə evdə görülür — bu xəta deyil.
 
-Server əlçatmaz olsa (ssh / worker xətası) 60 san. "dayanıb" sayılır və hər şey avtomatik evdə işləyir (fallback).
-Ayarlar bazada (remote:*) — /menu → 🖥 Sistem → ⚙️ Performans → 🌐 Uzaq server.
+Bölmələr: ayarlar → nəqliyyat (ssh) → quraşdırma / yoxlama → monitor izi → cookies → yükləmə → upload →
+xəta qapısı (Manual) → try_download / try_upload (cpu_pool və audio_cache bunları çağırır) → vəziyyət.
+Ayarlar bazada (remote:*). Menyu: /menu → 🖥 Sistem → ⚙️ Performans → 🌐 Uzaq server (bot/menus/views/remote_server.py).
 Sınaq üçün DLM_REMOTE_TRANSPORT=local — ssh əvəzinə yerli bash (server = bu maşın, iş qovluğu DLM_REMOTE_DIR).
 """
 import asyncio
@@ -34,8 +41,11 @@ _S = Settings("remote:", empty_is_default=True)
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 WORKER_SRC = os.path.join(ROOT, "bot", "core", "ytdl_worker.py")
 DEFAULT_DIR = "dlm_remote"
+MAX_PROCS = 16                        # paralel yükləmə / upload yuxarı həddi (hər biri ayrı proses)
 DOWN_FOR = 60                         # server xətasından sonra bu qədər saniyə evdə işlənir
 HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@:\-\[\]]*$")
+_IP_HINTS = ("sign in to confirm", "not a bot", "http error 403", "http error 429", "too many requests",
+             "this content isn't available, try again later")        # serverin IP-si ilə bağlı rədd
 _INFRA_HINTS = ("no module named", "command not found", "no such file or directory: 'yt", "permission denied",
                 "cannot allocate memory", "no space left")
 
@@ -48,13 +58,29 @@ class RemoteLocalOnly(RemoteUnavailable):
     """Bu tapşırıq serverdə görülə bilməz (məs. brauzer cookies) — server xəstə deyil, yalnız bu iş evdə görülür."""
 
 
+class RemoteRetryHome(RemoteLocalOnly):
+    """Server IP-si YouTube tərəfindən rədd edildi (bot yoxlaması / 403 / 429) — bu iş evdə təkrar olunur."""
+
+
 class RemoteUploadError(Exception):
     """Telegram serverdən yükləməni rədd etdi (flood, icazə...) — mətn olduğu kimi saxlanır."""
 
 
 # ───────────────────────── ayarlar ─────────────────────────
+MODES = ("home", "server", "both")
+MODE_LABEL = {"home": "🏠 Ev", "server": "🌐 Server", "both": "🏠+🌐 İkisi"}
+MAX_DEPO_SLOTS, MAX_USER_SLOTS = 16, 4
+PROC_MB = 100                          # bir server prosesinin yük altında təxmini RAM-ı
+
+
 def enabled() -> bool:
     return _S.flag("on")
+
+
+def set_enabled(on: bool) -> bool:
+    _S.put("on", "1" if on else "0")
+    mark_up()
+    return on
 
 
 def host() -> str:
@@ -78,58 +104,97 @@ def py() -> str:
     return _S.get("py", "python3") or "python3"
 
 
-def procs() -> int:
-    return _S.int("procs", 2, lo=1, hi=4)
-
-
-def download_flag() -> bool:
-    return _S.flag("download", "1")
-
-
-def upload_flag() -> bool:
-    return _S.flag("upload", "1")
+def _local_transport() -> bool:
+    return os.getenv("DLM_REMOTE_TRANSPORT") == "local"
 
 
 def configured() -> bool:
     return bool(host()) or _local_transport()
 
 
-def _local_transport() -> bool:
-    return os.getenv("DLM_REMOTE_TRANSPORT") == "local"
+def mode(kind: str) -> str:
+    """kind: 'download' | 'upload' → 'home' | 'server' | 'both'."""
+    v = _S.get(kind + "_mode")
+    if v in MODES:
+        return v
+    return "server" if _S.flag(kind, "1") else "home"          # köhnə aç/bağla ayarından
 
 
-stats = {"fallback": 0}                 # server alınmadı → iş evdə görüldü (say)
-_down = {"until": 0.0, "error": "", "at": 0.0}
+def set_mode(kind: str, value: str) -> str:
+    if kind not in ("download", "upload") or value not in MODES:
+        raise ValueError(f"{kind}/{value}")
+    _S.put(kind + "_mode", value)
+    return value
 
 
-def available() -> bool:
-    return enabled() and configured() and time.time() >= _down["until"]
+def dl_mode() -> str:
+    return mode("download")
 
 
-def download_on() -> bool:
-    return available() and download_flag()
+def up_mode() -> str:
+    return mode("upload")
 
 
-def upload_on() -> bool:
-    return available() and download_flag() and upload_flag()
+def auto_fallback() -> bool:
+    """🤖 Avto: server xətasında iş dərhal evdə görülür. ✋ Manual (standart): iş gözləyir, creator-a bildiriş gedir."""
+    return _S.flag("auto", "0")
 
 
-def mark_down(err: str, secs: int = DOWN_FOR):
-    _down.update(until=time.time() + secs, error=str(err)[:200], at=time.time())
-    logger.warning(f"🌐 Uzaq server dayanıb sayıldı ({secs} san.): {str(err)[:200]} — iş evdə görülür")
+def set_auto_fallback(on: bool) -> bool:
+    _S.put("auto", "1" if on else "0")
+    return on
 
 
-def mark_up():
-    _down["until"] = 0.0
+def depo_slots() -> int:
+    """📦 Depo: serverdə eyni anda neçə yükləmə (və eyni sayda upload)."""
+    return _S.int("procs", 2, lo=1, hi=MAX_DEPO_SLOTS)
 
 
-def down_info() -> tuple[float, str]:
-    left = _down["until"] - time.time()
-    return (left if left > 0 else 0.0), _down["error"]
+def user_slots() -> int:
+    """👤 İstifadəçi: ayrıca slotlar — depo növbəsi istifadəçini gözlətməsin."""
+    return _S.int("user_procs", 2, lo=1, hi=MAX_USER_SLOTS)
 
 
-def set_value(name: str, value) -> str:
-    """Mətn ayarları (host / port / key / dir). Yoxlanılır; səhv dəyərdə ValueError."""
+def set_slots(lane: str, n: int) -> int:
+    if lane == "depo":
+        n = max(1, min(MAX_DEPO_SLOTS, int(n)))
+        _S.put("procs", n)
+    elif lane == "user":
+        n = max(1, min(MAX_USER_SLOTS, int(n)))
+        _S.put("user_procs", n)
+    else:
+        raise ValueError(lane)
+    return n
+
+
+def lane_limit(lane: str) -> int:
+    return user_slots() if lane == "user" else depo_slots()
+
+
+def worst_case_procs() -> int:
+    """Eyni anda ən çox server prosesi: depo yükləmələri + depo uploadları + istifadəçi."""
+    return depo_slots() * 2 + user_slots()
+
+
+def slot_advice() -> dict:
+    """Slot sayı serverin RAM-ına uyğundurmu (son uğurlu yoxlamadakı RAM ilə)."""
+    ram = (last_check.get("info") or {}).get("ram_mb")
+    total = worst_case_procs()
+    out = {"total": total, "need_mb": total * PROC_MB, "ram_mb": ram, "rec_depo": None, "warn": False}
+    if ram:
+        budget = max(0.0, (ram - 500) * 0.7)                   # sistem və SSH üçün ~500 MB, qalanın 70%-i
+        out["rec_depo"] = max(1, min(MAX_DEPO_SLOTS, int((budget / PROC_MB - user_slots()) // 2)))
+        out["warn"] = total * PROC_MB > budget
+    return out
+
+
+def server_selected(kind: str) -> bool:
+    """Ayarlarda server seçilib (serverin hazırda sağlam olub-olmamasından asılı olmayaraq)."""
+    return enabled() and configured() and mode(kind) != "home"
+
+
+def set_conn(name: str, value) -> str:
+    """Bağlantı ayarları (host / port / key / dir). Yoxlanılır; səhv dəyərdə ValueError."""
     v = str(value).strip()
     if name == "host":
         if v and not HOST_RE.match(v):
@@ -138,6 +203,8 @@ def set_value(name: str, value) -> str:
         if not v.isdigit() or not 1 <= int(v) <= 65535:
             raise ValueError("Port 1–65535 arası rəqəm olmalıdır")
     elif name == "key":
+        if v.endswith(".pub"):
+            raise ValueError("Bu açıq açardır (.pub). Gizli açarı yazın — eyni ad, .pub-suz (məs. ~/.ssh/dlm_vps)")
         if v and not os.path.isfile(os.path.expanduser(v)):
             raise ValueError("Bu yolda açar faylı tapılmadı (bot işləyən maşında olmalıdır)")
         v = os.path.expanduser(v) if v else v
@@ -149,6 +216,53 @@ def set_value(name: str, value) -> str:
     _S.put(name, v)
     mark_up()
     return v
+
+
+# ── server sağlamlığı ──
+_inflight = {}                                    # (iş, zolaq) → serverə göndərilmiş, hələ bitməmiş işlər
+stats = {"fallback": 0, "ip_retry": 0}            # fallback — server alınmadı, iş evdə görüldü; ip_retry — IP rədd
+_down = {"until": 0.0, "error": "", "at": 0.0}
+last_check = {"at": 0.0, "ok": False, "error": "", "info": {}}      # son 🧪 yoxlamanın nəticəsi (menyuda göstərilir)
+
+
+def available() -> bool:
+    return enabled() and configured() and time.time() >= _down["until"]
+
+
+def upload_on() -> bool:
+    """Serverdə qalmış fayl serverdən göndərilə bilərmi (yükləmə də serverdədir və server sağlamdır)."""
+    return available() and mode("download") != "home" and mode("upload") != "home"
+
+
+def mark_down(err: str, secs: int = DOWN_FOR):
+    _down.update(until=time.time() + secs, error=str(err)[:200], at=time.time())
+    logger.warning(f"🌐 Uzaq server dayanıb sayıldı ({secs} san.): {str(err)[:200]} — "
+                   + ("iş evdə görülür" if auto_fallback() else "Manual rejim: iş gözləyir, bildiriş göndərilir"))
+
+
+def mark_up():
+    _down["until"] = 0.0
+
+
+def down_info() -> tuple[float, str]:
+    left = _down["until"] - time.time()
+    return (left if left > 0 else 0.0), _down["error"]
+
+
+def claim(kind: str, lane: str = "depo") -> bool:
+    """İş serverdə görülsün? 'server' — həmişə; 'ikisi' — yalnız zolağın serverdə boş yeri varsa (qalan iş evdə).
+    True qaytarsa çağıran finally-də release(kind, lane) etməlidir."""
+    m = mode(kind)
+    k = (kind, lane)
+    if m == "home" or (m == "both" and _inflight.get(k, 0) >= lane_limit(lane)):
+        return False
+    _inflight[k] = _inflight.get(k, 0) + 1
+    return True
+
+
+def release(kind: str, lane: str = "depo"):
+    k = (kind, lane)
+    _inflight[k] = max(0, _inflight.get(k, 0) - 1)
 
 
 # ───────────────────────── nəqliyyat ─────────────────────────
@@ -167,9 +281,8 @@ def _argv(cmd: str) -> list:
 
 
 def _in_dir(cmd: str) -> str:
-    d = rdir()
-    prefix = f"mkdir -p {shlex.quote(d)} && " if _local_transport() else ""
-    return f"{prefix}cd {shlex.quote(d)} && {cmd}"
+    d = shlex.quote(rdir())
+    return f"mkdir -p {d} && cd {d} && {cmd}"
 
 
 def worker_argv(nice: int = 0) -> list:
@@ -203,8 +316,9 @@ async def run(cmd: str, timeout: float = 30, stdin_data: bytes = None, in_dir: b
 
 async def push_bytes(data: bytes, rel: str, timeout: float = 60):
     q = shlex.quote(rel)
+    tmp = shlex.quote(f"{rel}.{uuid.uuid4().hex[:8]}.part")      # unikal ad: paralel yazılar bir-birinin faylını götürmür
     d = shlex.quote(os.path.dirname(rel) or ".")
-    rc, _, err = await run(f"mkdir -p {d} && cat > {q}.part && mv -f {q}.part {q}", timeout, data)
+    rc, _, err = await run(f"mkdir -p {d} && cat > {tmp} && mv -f {tmp} {q}", timeout, data)
     if rc:
         raise RemoteUnavailable(f"fayl serverə yazılmadı: {err[-150:]}")
 
@@ -277,6 +391,7 @@ async def touch(rel: str):
 
 # ───────────────────────── işçi faylı / quraşdırma ─────────────────────────
 _synced = {"hash": None}
+_sync_lock = None                      # eyni anda bir sinxronizasiya (16 işçi birlikdə açılanda təkrar göndərməsin)
 
 
 def _worker_bytes() -> bytes:
@@ -286,12 +401,18 @@ def _worker_bytes() -> bytes:
 
 async def ensure_synced(force: bool = False):
     """ytdl_worker.py serverdə evdəkinin eynisi olsun (bot yeniləndikdə avtomatik; bot başına bir dəfə)."""
+    global _sync_lock
     data = _worker_bytes()
     h = hashlib.sha256(data).hexdigest()
     if not force and _synced["hash"] == h:
         return
-    await push_bytes(data, "ytdl_worker.py")
-    _synced["hash"] = h
+    if _sync_lock is None:
+        _sync_lock = asyncio.Lock()
+    async with _sync_lock:
+        if not force and _synced["hash"] == h:                 # gözləyərkən başqası artıq göndərib
+            return
+        await push_bytes(data, "ytdl_worker.py")
+        _synced["hash"] = h
 
 
 async def check() -> dict:
@@ -316,7 +437,7 @@ async def check() -> dict:
         res["info"] = info
         if not info.get("yt_dlp"):
             res["error"] = "yt-dlp serverdə yoxdur — «🛠 Qur / yenilə»"
-        elif not info.get("aiogram") and upload_flag():
+        elif not info.get("aiogram") and mode("upload") != "home":
             res["error"] = "aiogram serverdə yoxdur (upload üçün) — «🛠 Qur / yenilə»"
         else:
             res["ok"] = True
@@ -324,6 +445,7 @@ async def check() -> dict:
         res["error"] = str(e)
     except (ValueError, IndexError) as e:
         res["error"] = f"diaqnostika oxunmadı: {e}"
+    last_check.update(at=time.time(), ok=res["ok"], error=res["error"], info=res["info"] or last_check.get("info", {}))
     if res["ok"]:
         mark_up()
     return res
@@ -359,20 +481,114 @@ async def setup() -> list:
     return log
 
 
+# ───────────────────────── 📊 depo monitoru üçün iz ─────────────────────────
+counts = {"dl_S": 0, "dl_E": 0, "up_S": 0, "up_E": 0}      # S — server, E — ev (cəhd / göndərmə sayı)
+
+
+def mark(kind: str, where: str):
+    """Depo doldurucunun cari işçisi üçün qeyd: kind 'dl'|'up', where 'S' (server) | 'E' (ev).
+    Monitorda işçi sətrində 'YER' sütunu və ümumi say kimi görünür. Doldurucu konteksti yoxdursa — yalnız say."""
+    counts[f"{kind}_{where}"] += 1
+    try:
+        from bot.core.depo_helpers import UPLOAD_CTX
+        ctx = UPLOAD_CTX.get()
+        if ctx:
+            filler, idx = ctx
+            st = filler.wstate.get(idx)
+            if st is not None:
+                st.setdefault("via", {})[kind] = where
+    except Exception as e:
+        logger.debug("remote.mark xətası: %r", e)
+
+
+def via_text(st: dict) -> str:
+    v = (st or {}).get("via") or {}
+    return f"{v.get('dl', '-')}/{v.get('up', '-')}"
+
+
 # ───────────────────────── yükləmə ─────────────────────────
 _cookie_cache = {}                     # yerli yol → (mtime, ölçü, uzaq yol)
 PENDING = {}                           # yerli yer-tutan fayl (abspath) → (uzaq yol, ölçü): fayl hələ serverdədir
+_sizes = {}                            # yer-tutanın əsl ölçüsü (göndərildikdən sonra da) — statistikada 0 bayt görünməsin
 
 
 def _loopback(url: str) -> bool:
     return bool(re.search(r"//(?:[^@/]*@)?(?:localhost|127\.|\[?::1)", url or ""))
 
 
+# ── 🍪 brauzer cookies-i serverdə: yalnız YouTube / Google domenləri, hesab üçün icazə verilibsə ──
+COOKIE_TTL = 30 * 60                   # ixrac olunmuş fayl bu qədər saniyə təzə sayılır
+COOKIE_DIR = os.path.join(ROOT, "data", "remote_cookies")
+_cookie_locks = {}
+
+
+def acc_allowed(acc_id: str) -> bool:
+    return _S.flag(f"acc_{acc_id}", "0")
+
+
+def toggle_acc(acc_id: str) -> bool:
+    return _S.toggle(f"acc_{acc_id}", "0")
+
+
+def _account_for(spec) -> dict | None:
+    """yt-dlp 'cookiesfrombrowser' dəyərinə uyğun YouTube hesabı (hesab açarını tapmaq üçün)."""
+    from bot.core import yt_accounts
+    for acc in yt_accounts.accounts():
+        try:
+            if tuple(yt_accounts.opts(acc).get("cookiesfrombrowser") or ()) == tuple(spec):
+                return acc
+        except Exception as e:
+            logger.debug("hesab uyğunlaşdırması: %r", e)
+    return None
+
+
+def _youtube_only(jar):
+    """Cookie qabından yalnız youtube / google olanlar (başqa saytların cookies-i serverə getmir) → (yeni qab, say)."""
+    from yt_dlp.cookies import YoutubeDLCookieJar
+    out, n = YoutubeDLCookieJar(), 0
+    for c in jar:
+        d = (c.domain or "").lower()
+        if "youtube" in d or "google" in d:
+            out.set_cookie(c)
+            n += 1
+    return out, n
+
+
+def _export_cookies(spec, path: str) -> int:
+    """Brauzer cookies-indən YouTube / Google olanları fayla yazır (rejim 600) → cookie sayı."""
+    from yt_dlp import YoutubeDL
+    with YoutubeDL({"cookiesfrombrowser": tuple(spec), "quiet": True, "no_warnings": True}) as ydl:
+        out, n = _youtube_only(ydl.cookiejar)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    out.save(path, ignore_discard=True, ignore_expires=True)
+    os.chmod(path, 0o600)
+    return n
+
+
+async def _browser_cookie_file(spec) -> str:
+    acc = _account_for(spec)
+    if acc is None or not acc_allowed(acc["id"]):
+        raise RemoteLocalOnly("hesab serverdə istifadə üçün açılmayıb" if acc else "hesab tapılmadı")
+    path = os.path.join(COOKIE_DIR, f"{acc['id']}.txt")
+    lock = _cookie_locks.setdefault(acc["id"], asyncio.Lock())
+    async with lock:
+        fresh = os.path.exists(path) and time.time() - os.path.getmtime(path) < COOKIE_TTL
+        if not fresh:
+            try:
+                n = await asyncio.to_thread(_export_cookies, spec, path)
+            except Exception as e:
+                raise RemoteLocalOnly(f"cookies ixrac olunmadı: {type(e).__name__}: {str(e)[:100]}")
+            if not n:
+                raise RemoteLocalOnly("brauzerdə YouTube cookies-i tapılmadı")
+            logger.info(f"🍪 {acc['name']}: {n} cookie server üçün ixrac olundu")
+    return path
+
+
 async def prepare_opts(opts: dict) -> tuple[dict, str]:
     """Yerli yt-dlp opsiyalarını serverə uyğunlaşdırır → (opsiyalar, yerli qovluq). Alınmasa RemoteLocalOnly."""
     o = dict(opts)
     if o.get("cookiesfrombrowser"):
-        raise RemoteLocalOnly("brauzer cookies-i yalnız evdə oxunur")
+        o["cookiefile"] = await _browser_cookie_file(o.pop("cookiesfrombrowser"))     # → fayl, aşağıda serverə göndərilir
     if o.get("proxy") and _loopback(str(o["proxy"])):
         raise RemoteLocalOnly("proxy evin localhost-undadır")
     tmpl = o.get("outtmpl")
@@ -432,8 +648,8 @@ def _is_infra(msg: str) -> bool:
     return any(h in m for h in _INFRA_HINTS)
 
 
-def _sync_pool(pool):
-    n = procs()
+def _sync_pool(pool, n: int = None):
+    n = n or depo_slots()
     if pool.size != n:
         pool.size = pool.max_size = n
         pool.kick()
@@ -444,8 +660,8 @@ async def download(args: tuple, timeout: float, cancel_event, local_cancel_path:
     from bot.core import cpu_pool as cp
     url, opts = args[0], args[1]
     ropts, local_dir = await prepare_opts(opts)
-    pool = cp.REMOTE
-    _sync_pool(pool)
+    pool = cp.REMOTE_LANES.get(lane, cp.REMOTE_LANES["depo"])      # 👤 / 📦 ayrı slotlar
+    _sync_pool(pool, lane_limit(lane))
     rid = uuid.uuid4().hex[:10]
     rcancel = f"dl/.c_{rid}"
     mirror = asyncio.ensure_future(_mirror_progress(rcancel + ".prog", local_cancel_path + ".prog")) \
@@ -460,6 +676,11 @@ async def download(args: tuple, timeout: float, cancel_event, local_cancel_path:
         if _is_infra(str(e)):
             mark_down(e)
             raise RemoteUnavailable(str(e))
+        if any(h in str(e).lower() for h in _IP_HINTS):
+            stats["ip_retry"] += 1
+            rh = RemoteRetryHome(f"serverin IP-si rədd edildi: {str(e)[:90]}")
+            rh.original = e                                   # ✋ Manual rejimdə evə keçmir — əsl xəta yuxarı qalxır
+            raise rh
         raise
     finally:
         for t in (mirror, canceller):
@@ -476,6 +697,9 @@ async def download(args: tuple, timeout: float, cancel_event, local_cancel_path:
         os.makedirs(local_dir, exist_ok=True)
         open(lpath, "wb").close()                          # yer-tutan: hələ serverdədir (upload oradan gedəcək)
         PENDING[os.path.abspath(lpath)] = (rpath, size)
+        _sizes[os.path.abspath(lpath)] = size
+        while len(_sizes) > 2000:                          # yaddaş sızmasın: ən köhnələr atılır
+            _sizes.pop(next(iter(_sizes)))
         return {"path": lpath, "info": res["info"]}
     for attempt in (1, 2):
         try:
@@ -489,13 +713,14 @@ async def download(args: tuple, timeout: float, cancel_event, local_cancel_path:
 
 
 # ───────────────────────── upload ─────────────────────────
+def file_size(path) -> int:
+    """Faylın ölçüsü; serverdə qalmış (yer-tutan) fayl üçün əsl ölçü. Fayl yoxdursa OSError (os.path.getsize kimi)."""
+    n = os.path.getsize(path)
+    return n or _sizes.get(os.path.abspath(path), 0)
+
+
 def pending(path) -> bool:
     return isinstance(path, str) and os.path.abspath(path) in PENDING
-
-
-def pending_size(path) -> int:
-    ent = PENDING.get(os.path.abspath(path)) if isinstance(path, str) else None
-    return ent[1] if ent else 0
 
 
 async def materialize(path: str) -> bool:
@@ -550,13 +775,224 @@ async def upload_audio(path: str, token: str, chat_id: int, thread_id, filename:
     return Message.model_validate(d)
 
 
+# ───────────────────────── ✋ Manual rejim: server xətasında qərar qapısı ─────────────────────────
+GATE_TIMEOUT = 900                     # gözləyən iş bu qədər saniyədən sonra xəta ilə bitir (depo təkrar növbəsinə düşür)
+PROBE_EVERY = 20                       # server bərpa olunubmu — bu intervalla yoxlanır
+_gate = {"ev": None, "decision": None, "waiting": 0, "notified_at": 0.0, "msg": None}
+
+
+def waiting_count() -> int:
+    return _gate["waiting"]
+
+
+def resolve_gate(decision: str):
+    """Gözləyən işləri azad edir: 'retry' — yenidən serverə, 'home' — evdə işlət."""
+    ev = _gate["ev"]
+    if ev is not None and not ev.is_set():
+        _gate["decision"] = decision
+        ev.set()
+
+
+async def _notify_outage(err: str):
+    """Creator-a bildiriş + düymələr: 🔁 yenidən yoxla · 🏠 evə keç · 🤖 avto."""
+    if time.time() - _gate["notified_at"] < 600:              # tez-tez dəyişən xətada spam olmasın
+        return None
+    _gate["notified_at"] = time.time()
+    try:
+        from html import escape
+        from aiogram.types import InlineKeyboardButton as B, InlineKeyboardMarkup as M
+        from bot.menus.state import get_context
+        ctx = get_context()
+        text = (f"🔴 <b>Uzaq server cavab vermir</b>\n<code>{escape(str(err)[:200])}</code>\n\n"
+                f"⬇️ Yükləmə: <b>{MODE_LABEL[dl_mode()]}</b> · ⬆️ Upload: <b>{MODE_LABEL[up_mode()]}</b>\n"
+                f"Xəta rejimi <b>✋ Manual</b> olduğundan iş evə keçmir, gözləyir.\n\nNə edək?")
+        kb = M(inline_keyboard=[
+            [B(text="🔁 Yenidən yoxla", callback_data="menu:rmt:fix:retry")],
+            [B(text="🏠 Evə keç", callback_data="menu:rmt:fix:home"),
+             B(text="🤖 Avto", callback_data="menu:rmt:fix:auto")]])
+        return await ctx.bot.send_message(ctx.creator_id, text, parse_mode="HTML", reply_markup=kb)
+    except Exception as e:
+        logger.warning(f"🌐 Server bildirişi göndərilmədi: {type(e).__name__}: {e}")
+        return None
+
+
+async def _outage_loop(ev, err: str):
+    """Bildiriş göndərir, sonra server bərpa olunana (və ya qərar verilənə) qədər yoxlayır."""
+    msg = await _notify_outage(err)
+    deadline = time.monotonic() + 1800
+    while not ev.is_set() and time.monotonic() < deadline:
+        await asyncio.sleep(PROBE_EVERY)
+        if ev.is_set():
+            return
+        res = await check()
+        if res["ok"]:
+            resolve_gate("retry")
+            if msg is not None:
+                try:
+                    await msg.edit_text("✅ <b>Uzaq server bərpa olundu</b> — gözləyən işlər davam edir.", parse_mode="HTML")
+                except Exception as e:
+                    logger.debug("bildiriş yenilənmədi: %r", e)
+            return
+
+
+async def wait_decision(kind: str, err, cancel_event=None, timeout: float = None) -> str:
+    """✋ Manual: server alınmadı — iş burada gözləyir. → 'retry' (yenidən serverə) | 'home' (evdə işlət).
+    Gözləmə bitərsə RemoteUnavailable; ⏹ basılarsa DownloadCancelled."""
+    timeout = timeout or GATE_TIMEOUT
+    g = _gate
+    if g["ev"] is None or g["ev"].is_set():
+        g["ev"], g["decision"] = asyncio.Event(), None
+        asyncio.ensure_future(_outage_loop(g["ev"], str(err)))
+    ev, t0 = g["ev"], time.monotonic()
+    g["waiting"] += 1
+    try:
+        while True:
+            try:
+                await asyncio.wait_for(ev.wait(), 1.0)
+                return g["decision"] or "retry"
+            except asyncio.TimeoutError:
+                if cancel_event is not None and cancel_event.is_set():
+                    from yt_dlp.utils import DownloadCancelled
+                    raise DownloadCancelled("İstifadəçi yükləməni dayandırdı")
+                if time.monotonic() - t0 > timeout:
+                    raise RemoteUnavailable(f"uzaq server əlçatmaz — {int(timeout)} san. gözlənildi: {str(err)[:80]}")
+    finally:
+        g["waiting"] = max(0, g["waiting"] - 1)
+
+
+async def apply_fix(action: str) -> str:
+    """Bildiriş və menyudakı qərar düymələrinin icrası → istifadəçiyə nəticə mətni (HTML)."""
+    if action == "retry":
+        res = await check()
+        if res["ok"]:
+            resolve_gate("retry")
+            return "✅ Server cavab verdi — gözləyən işlər davam edir."
+        from html import escape
+        return f"❌ Server hələ cavab vermir: {escape(res['error'][:200])}"
+    if action == "home":
+        set_mode("download", "home")
+        set_mode("upload", "home")
+        resolve_gate("home")
+        return "🏠 Yükləmə və upload evə keçirildi, gözləyən işlər evdə görülür. Geri qaytarmaq üçün aşağıdan seçin."
+    if action == "auto":
+        set_auto_fallback(True)
+        resolve_gate("home")
+        return "🤖 Avto açıldı: gözləyən işlər indi evdə görülür, bundan sonra server xətasında iş avtomatik evə keçir."
+    return "?"
+
+
+def _stopping() -> bool:
+    from bot.core import cpu_pool as cp
+    return bool(getattr(cp, "_STOPPING", False))
+
+
+async def try_download(args: tuple, timeout: float, cancel_event, local_cancel_path: str, lane: str):
+    """Yükləməni serverdə görməyə çalışır. → nəticə, və ya None (bu iş evdə görülməlidir).
+    🤖 Avto: server xətasında dərhal None. ✋ Manual: xəta olarsa gözləyir (bildiriş + düymələr)."""
+    while True:
+        if not server_selected("download"):
+            return None
+        if not available():
+            if auto_fallback():
+                stats["fallback"] += 1
+                return None
+            if await wait_decision("download", down_info()[1] or "server dayanıb", cancel_event) == "home":
+                return None
+            continue
+        if not claim("download", lane):
+            return None                                       # 🏠+🌐 ikisi: server dolu → artıq iş evdə
+        mark("dl", "S")
+        try:
+            return await download(args, timeout, cancel_event, local_cancel_path, lane)
+        except RemoteRetryHome as e:
+            if auto_fallback():
+                logger.info(f"🌐 Bu yükləmə evdə: {e}")
+                return None
+            raise getattr(e, "original", e)                   # ✋ server IP-si rədd edildi — evə keçmir, xəta olduğu kimi
+        except RemoteLocalOnly as e:
+            logger.debug(f"🌐 Bu yükləmə evdə: {e}")        # server üçün uyğun deyil (brauzer cookies-i və s.)
+            return None
+        except RemoteUnavailable as e:
+            if _stopping():
+                raise asyncio.CancelledError("bot dayanır") from e
+            if auto_fallback():
+                stats["fallback"] += 1
+                logger.warning(f"🌐 Uzaq yükləmə alınmadı: {e} — evdə yüklənir")
+                return None
+            if await wait_decision("download", e, cancel_event) == "home":
+                return None
+        finally:
+            release("download", lane)
+
+
+async def try_upload(path: str, token: str, chat_id: int, thread_id, filename: str, title: str, performer: str,
+                     duration: int, caption: str, thumb: bytes = None):
+    """Serverdəki faylı serverdən göndərməyə çalışır. → aiogram Message, və ya None (fayl evə çəkilib evdən getməlidir).
+    Telegram xətası — RemoteUploadError."""
+    while True:
+        if not (pending(path) and server_selected("upload")):
+            return None
+        if not available():
+            if auto_fallback():
+                stats["fallback"] += 1
+                return None
+            if await wait_decision("upload", down_info()[1] or "server dayanıb") == "home":
+                return None
+            continue
+        if not claim("upload"):
+            return None
+        try:
+            msg = await upload_audio(path, token, chat_id, thread_id, filename, title, performer, duration, caption, thumb)
+            mark("up", "S")
+            return msg
+        except RemoteUnavailable as e:
+            if auto_fallback():
+                stats["fallback"] += 1
+                logger.info(f"🌐 Uzaq upload alınmadı ({e}) — fayl evə çəkilir")
+                return None
+            if await wait_decision("upload", e) == "home":
+                return None
+        finally:
+            release("upload")
+
+
 # ───────────────────────── vəziyyət ─────────────────────────
-def status_line() -> str:
+def status() -> tuple[str, str]:
+    """(ikon, qısa mətn) — menyunun vəziyyət sətri."""
     if not enabled():
-        return "⚪ söndürülüb"
+        return "⚪", "Söndürülüb, hər şey evdə"
     if not configured():
-        return "🟡 ünvan təyin edilməyib"
+        return "🟡", "Ünvan daxil edilməyib"
     left, err = down_info()
     if left:
-        return f"🔴 dayanıb (~{int(left)} san.) · {err[:80]}"
-    return "🟢 aktiv"
+        return "🔴", "Dayanıb" + (f": {err[:70]}" if err else "")
+    if last_check["at"]:
+        return ("🟢", "İşləyir") if last_check["ok"] else ("🟡", last_check["error"][:80] or "Yoxlama alınmadı")
+    return "🟢", "Aktiv, hələ yoxlanmayıb"
+
+
+def check_is_stale(max_age: float = 300.0) -> bool:
+    return time.time() - last_check["at"] > max_age
+
+
+def snapshot() -> dict:
+    """Menyu üçün bütün vəziyyət bir yerdə (görünüşlər yalnız bunu formatlayır)."""
+    icon, text = status()
+    running = {"depo": 0, "user": 0, "up": 0}
+    done = 0
+    try:
+        from bot.core import cpu_pool as cp
+        running = {"depo": cp.REMOTE_LANES["depo"].running, "user": cp.REMOTE_LANES["user"].running,
+                   "up": cp.REMOTE_UP.running}
+        done = sum(p.stats["done"] for p in cp.REMOTE_LANES.values()) + cp.REMOTE_UP.stats["done"]
+    except Exception as e:
+        logger.debug("pool vəziyyəti oxunmadı: %r", e)
+    return {
+        "icon": icon, "status": text, "enabled": enabled(), "configured": configured(),
+        "host": host(), "port": port(), "key": key(), "dir": rdir(),
+        "dl": mode("download"), "up": mode("upload"), "auto": auto_fallback(),
+        "depo_slots": depo_slots(), "user_slots": user_slots(),
+        "waiting": _gate["waiting"], "pending_files": len(PENDING), "running": running, "done": done,
+        "fallback": stats["fallback"], "ip_retry": stats["ip_retry"],
+        "check": dict(last_check), "info": last_check.get("info") or {},
+    }

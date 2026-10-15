@@ -135,6 +135,7 @@ class ChatState:
         self.np_msg = None
         self.idle_task = None
         self.lock = asyncio.Lock()
+        self.held = False                 # ⏳ "Bitdikdə restart": mahnı bitdi, növbə restartdan sonra davam edəcək
         self.radio = None
         self.joining = 0.0
         self.refilling = False

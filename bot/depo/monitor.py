@@ -160,12 +160,36 @@ def _xfer_lines(filler, now: float) -> list:
     ]
 
 
+def _remote_active() -> bool:
+    """🌐 Uzaq server rejimi açıqdırsa (və ya bu sessiyada iş getmişdisə) monitor 'D/U' sütununu göstərir."""
+    try:
+        from bot.core import remote
+        return remote.enabled() or any(remote.counts.values())
+    except Exception:
+        return False
+
+
+def _via(w: dict) -> str:
+    from bot.core import remote
+    return remote.via_text(w)
+
+
+def _remote_lines() -> list:
+    """Yükləmə / upload neçə dəfə serverdə (S), neçə dəfə evdə (E) getdi."""
+    if not _remote_active():
+        return []
+    from bot.core import remote
+    c = remote.counts
+    return [f"Yer dl S{c['dl_S']}/E{c['dl_E']}  up S{c['up_S']}/E{c['up_E']}  (S server, E ev)"]
+
+
 def render_top(filler, sess: dict, proc: dict, now_str: str) -> str:
     now = time.time()
     st = filler.stats
     on = filler.running
     want = filler.workers
     ws = dict(filler.wstate)
+    show_via = _remote_active()
     active = sum(1 for w in ws.values() if w["phase"] in ("DL", "CHK", "SRCH", "UP", "SLOT"))
     buckets = [0] * TOP_SPARK_MIN
     for ts in reversed(filler.done_ts):
@@ -193,6 +217,7 @@ def render_top(filler, sess: dict, proc: dict, now_str: str) -> str:
         f"Avg {avg:.0f}s/mahni  cemi {_human(filler.bytes)}",
         f"Tot up {st['done']}  skip {st['cached']}  err {st['failed']}",
         *_xfer_lines(filler, now),
+        *_remote_lines(),
         *_user_lines(now),
         f"Bot cpu {proc['cpu']:.0f}%  ram {_human(proc['rss'])}  thr {proc['threads']}",
         *_helpers_line(getattr(filler, "helpers", None)),
@@ -221,11 +246,11 @@ def render_top(filler, sess: dict, proc: dict, now_str: str) -> str:
         for i in range(max(want, max(ws) + 1 if ws else 0)):
             w = ws.get(i)
             if w is None:
-                rows.append((i, "-", 0.0, "(başlayır)" if on and i < want else "(dayanıb)"))
+                rows.append((i, "-", 0.0, "(başlayır)" if on and i < want else "(dayanıb)", ""))
                 continue
             ph = w["phase"] or "WAIT"
             title = w["title"] or {"SLP": "(fasilə)", "WAIT": "(növbə gözləyir)"}.get(ph, "")
-            rows.append((i, ph, now - w["since"], title))
+            rows.append((i, ph, now - w["since"], title, _via(w) if show_via else ""))
         if sess["sort"] == "time":
             rows.sort(key=lambda r: (PHASE_ORDER.get(r[1], 9), -r[2]))
         if len(rows) > 16:
@@ -241,9 +266,14 @@ def render_top(filler, sess: dict, proc: dict, now_str: str) -> str:
         title_w = TOP_TITLE - (w - 2)
         if pages > 1:
             lines.append(f"Sehife {pg + 1}/{pages} · {len(rows)} isci")
-        lines.append(f"{'#':>{w}} {'ST':<4} {'VAXT':>6} MAHNI")
-        for i, ph, el, title in page_rows:
-            lines.append(f"{i + 1:>{w}} {ph:<4} {_mmss(el) if ph != '-' else '':>6} {_short(title, title_w)}")
+        if show_via:
+            title_w -= 4
+            lines.append(f"{'#':>{w}} {'ST':<4} {'VAXT':>6} {'D/U':<3} MAHNI")
+        else:
+            lines.append(f"{'#':>{w}} {'ST':<4} {'VAXT':>6} MAHNI")
+        for i, ph, el, title, via in page_rows:
+            lines.append(f"{i + 1:>{w}} {ph:<4} {_mmss(el) if ph != '-' else '':>6} "
+                         + (f"{via:<3} " if show_via else "") + f"{_short(title, title_w)}")
         lines += _user_rows(now, TOP_TITLE - 1)
 
     if sess["paused"]:
@@ -259,10 +289,11 @@ def render_top(filler, sess: dict, proc: dict, now_str: str) -> str:
     if st["note"]:
         head += f"\nℹ️ <i>{escape(st['note'][:120])}</i>"
     legend = ("<i>DL yükləyir · UP depoya göndərir · SLOT köməkçi bot gözləyir · SRCH axtarır · "
-              "CHK depo yoxlanır · SLP fasilə · WAIT növbə</i>"
+              "CHK depo yoxlanır · SLP fasilə · WAIT növbə"
+              + (" · D/U — yükləmə/upload yeri: S server, E ev" if _remote_active() else "") + "</i>"
               if sess["view"] != "log" else "<i>OK yükləndi · SKIP artıq depoda · RTRY sonra təkrar · ERR ❌ siyahısına · 404 tapılmadı · "
               "DEL depodan silinib · STOP istifadəçi dayandırdı · FLD Telegram flood gözləməsi</i>")
     legend += ("\n<i>📡 # — doldurucu işçisi · MSG şəxsi çat · GRP qrup · INL inline · MIX · "
                "BAT toplu · PL playlist · ART /artist · LNK link · Usr — istifadəçi yükləmələri · "
-               "Net — sürət: dl YouTube→server, up server→depo; (1 fayl) orta, axın — bütün işçilər birlikdə</i>")
+               "Net — sürət: dl YouTube→yükləyən maşın, up yükləyən maşın→depo; (1 fayl) orta, axın — bütün işçilər birlikdə</i>")
     return f"{head}\n{wrap_ui_text(escape(chr(10).join(lines)))}\n{legend}"

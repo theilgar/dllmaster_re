@@ -621,13 +621,15 @@ def setup(context):
             return False
         try:
             from bot.plugins.restart_plugin import is_restart_pending
-            if is_restart_pending() and not is_creator(message.from_user.id):
+            live = message.chat.id in va.chats                # canlı yayım var: komandalar işləyir, əlavə olunanlar
+            if is_restart_pending() and not live and not is_creator(message.from_user.id):   # restartdan sonra bərpa olunur
                 await message.reply(tr("⏳ <b>Bot restart üçün gözləmədədir.</b>\n"
                                        "Cari mahnılar və yükləmələr bitdikdən sonra bot yenidən başlayacaq (1-2 dəqiqə).\n"
                                        "Zəhmət olmasa bir az sonra yenidən cəhd edin."), parse_mode="HTML")
                 return False
         except Exception as _e:
             logger.debug("udulan xəta [bot/voice/handlers.py:628]: %r", _e)
+        await va.wait_resumed(message.chat.id)              # ♻️ restartdan sonra yayım bərpa olunana qədər gözlə
         if not va.enabled:
             await notify_disabled(message.chat.id, reply_to=message.message_id)
             return False
@@ -722,7 +724,9 @@ def setup(context):
                     last_edit[0] = now
                     await _safe_status(f"⏳ <b>{escape(t.title[:80])}</b>\n<i>{label}</i>")
 
-                kind, pos = await va.enqueue(message.chat.id, message.chat.title or "", t, progress)
+                st0 = va.chats.get(message.chat.id)
+                kind, pos = await va.enqueue(message.chat.id, message.chat.title or "", t, progress,
+                                             front=bool(st0 and st0.radio))     # 🔀 Mixplay açıqdır → növbənin əvvəlinə
                 if kind == "playing":
                     with contextlib.suppress(Exception):
                         await status.delete()
@@ -1396,6 +1400,7 @@ def setup(context):
     @dp.callback_query(F.data.startswith("vp:"))
     async def vp_cb(cb: types.CallbackQuery):
         chat_id = cb.message.chat.id
+        await va.wait_resumed(chat_id)                      # ♻️ restartdan sonra bərpa bitənə qədər
         st = va.chats.get(chat_id)
         action = cb.data.split(":", 1)[1]
 
@@ -1522,57 +1527,9 @@ def setup(context):
                         parse_mode="HTML"
                     )
 
-            cur_data = data.get("current")
-            queue_data = data.get("queue") or []
-
-            cur_track = None
-            if cur_data:
-                cur_track = Track(
-                    cur_data["title"],
-                    cur_data.get("vid"),
-                    cur_data.get("url"),
-                    cur_data.get("duration") or 0,
-                    cur_data.get("file_id"),
-                    cur_data.get("by") or "Bərpa",
-                    depo=bool(cur_data.get("file_id")),
-                    src="depo" if cur_data.get("file_id") else "yt"
-                )
-            elif queue_data:
-                first = queue_data.pop(0)
-                cur_track = Track(
-                    first["title"],
-                    first.get("vid"),
-                    first.get("url"),
-                    first.get("duration") or 0,
-                    first.get("file_id"),
-                    first.get("by") or "Bərpa",
-                    depo=bool(first.get("file_id")),
-                    src="depo" if first.get("file_id") else "yt"
-                )
-
-            if cur_track:
-                try:
-                    await va.enqueue(chat_id, data.get("title") or (cb.message.chat.title or ""), cur_track)
-                    st = va.chats.get(chat_id)
-                    if st:
-                        for q in queue_data:
-                            qt = Track(
-                                q["title"],
-                                q.get("vid"),
-                                q.get("url"),
-                                q.get("duration") or 0,
-                                q.get("file_id"),
-                                q.get("by") or "Bərpa",
-                                depo=bool(q.get("file_id")),
-                                src="depo" if q.get("file_id") else "yt",
-                                user_id=q.get("user_id"),
-                                track_id=q.get("track_id"),
-                            )
-                            st.queue.append(qt)
-                        if st.queue:
-                            va.prefetch(st.queue[0])
-                        va.save_active_sessions()
-                        await va.refresh_np(st)
+            try:
+                ok = await va.restore_chat(chat_id, {**data, "title": data.get("title") or (cb.message.chat.title or "")})
+                if ok:
                     with contextlib.suppress(Exception):
                         with ui_styled("voice"):
                             await cb.message.edit_text(
@@ -1580,14 +1537,14 @@ def setup(context):
                                 parse_mode="HTML"
                             )
                     spawn(_autodelete(cb.message, 10))
-                except Exception as e:
-                    logger.warning(f"🎙 Bərpa xətası ({chat_id}): {e}")
-                    with contextlib.suppress(Exception):
-                        with ui_styled("voice"):
-                            await cb.message.edit_text(
-                                f"❌ <b>Bərpa xətası:</b> {escape(str(e)[:200])}",
-                                parse_mode="HTML"
-                            )
+            except Exception as e:
+                logger.warning(f"🎙 Bərpa xətası ({chat_id}): {e}")
+                with contextlib.suppress(Exception):
+                    with ui_styled("voice"):
+                        await cb.message.edit_text(
+                            f"❌ <b>Bərpa xətası:</b> {escape(str(e)[:200])}",
+                            parse_mode="HTML"
+                        )
 
     @dp.callback_query(F.data.startswith("vq:del:"))
     async def vq_del_cb(cb: types.CallbackQuery):
@@ -1670,6 +1627,7 @@ def setup(context):
         if old is not None:
             with contextlib.suppress(Exception):
                 await old.stop()                         # plugin reload — köhnə client bağlansın
+        va.prepare_recovery()                            # ♻️ planlı restart: bərpa olunacaq qruplar əvvəlcədən qeyd edilir
         if va.enabled and va.has_session():
             await va.start()
             spawn(va.check_restart_recovery())

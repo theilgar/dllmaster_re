@@ -173,6 +173,8 @@ class Filler(FailuresMixin, SyncMixin, QueueMixin, CountriesMixin):
     def _phase(self, idx: int, phase: str, title: str = None):
         st = self.wstate.setdefault(idx, {"phase": "", "title": "", "since": time.time()})
         if title is not None:
+            if title != st.get("title"):
+                st.pop("via", None)                 # 🌐 yeni mahnı — yükləmə / upload yeri (S/E) sıfırlanır
             st["title"] = title
         if st["phase"] != phase:
             st["phase"], st["since"] = phase, time.time()
@@ -670,7 +672,8 @@ class Filler(FailuresMixin, SyncMixin, QueueMixin, CountriesMixin):
             size = 0
             if res.get("path"):
                 try:
-                    size = os.path.getsize(res["path"])
+                    from bot.core import remote
+                    size = remote.file_size(res["path"])           # 🌐 serverdə qalan fayl da əsl ölçü ilə
                     os.remove(res["path"])
                 except OSError:
                     pass
