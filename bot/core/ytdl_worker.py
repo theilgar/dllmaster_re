@@ -63,6 +63,9 @@ def _quiet(opts: dict) -> dict:
     return opts
 
 
+FILE_TOO_LARGE = "Fayl ölçü limitindən böyükdür"
+
+
 def ping():
     return os.getpid()
 
@@ -90,6 +93,9 @@ def ytdl_download(url: str, opts: dict, cancel_path: str = None):
         info = ydl.extract_info(url, download=True)
         downloads = info.get("requested_downloads") or []
         path = downloads[0]["filepath"] if downloads else ydl.prepare_filename(info)
+        if opts.get("max_filesize") and not os.path.exists(path):
+            # yt-dlp max_filesize aşılanda xəta atmır, sadəcə yükləmir ("File is larger than max-filesize")
+            raise RuntimeError(f"{FILE_TOO_LARGE} ({int(opts['max_filesize']) // 1048576} MB)")
         return {"path": path, "info": _slim(ydl.sanitize_info(info))}
 
 

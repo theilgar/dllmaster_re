@@ -441,7 +441,8 @@ ACCOUNT_BLOCK = ("Your account has been rate-limited", "This content isn't avail
 UNAVAILABLE = "Video unavailable"
 # Videonun özünə aid xətalar — üsul (klient) xarab deyil, ona görə 🎯 birinci üsul bunlara görə dəyişmir.
 # ("Video unavailable" cookies ilə hesabın o videonu görməməsi də ola bilər — yenə üsulun günahı deyil.)
-VIDEO_ERRORS = (UNAVAILABLE, "age-restricted", "Private video", "This video is unavailable",
+FILE_TOO_LARGE = "Fayl ölçü limitindən böyükdür"      # ytdl_worker.FILE_TOO_LARGE ilə eyni — bütün üsullarda eyni nəticə
+VIDEO_ERRORS = (FILE_TOO_LARGE, UNAVAILABLE, "age-restricted", "Private video", "This video is unavailable",
                 "live stream recording is not available", "members-only", "This video has been removed")
 
 
@@ -780,6 +781,10 @@ async def download_as_m4a(url: str, base_name: str, browser: str, cancel_event=N
                 raise DownloadCancelled("İstifadəçi yükləməni dayandırdı")
             last_error = e
             errors.append((label, e))
+            if FILE_TOO_LARGE in str(e):               # videonun özündəndir: başqa üsul / hesab kömək etməz
+                logger.info(f"Yükləmə ləğv: {str(e)[:120]}")
+                remove_partial(base_name)
+                break
             attempt_failed(label, e)
             logger.info(f"Cəhd uğursuz ({label}): {str(e)[:200]}")       # növbəti üsul sınanır — WARNING deyil
             remove_partial(base_name)
@@ -1015,7 +1020,8 @@ class YoutubeManager:
         Axtarış — mənbə /menu-dan seçilir (search_source()): yt | ytm | both.
         Nəticə formatı hər mənbədə eynidir: {title, url, duration, raw_duration, source}.
         """
-        source = source if source in SEARCH_SOURCES else search_source()
+        explicit = source in SEARCH_SOURCES            # çağıran mənbəni özü seçibsə 🤖 uyğunluq süzgəci tətbiq olunmur
+        source = source if explicit else search_source()
         query = re.sub(r'["\'«»“”„‟`]', ' ', query or '').strip()
         query = re.sub(r'\s+', ' ', query).strip(" -:;,.")
         try:
@@ -1028,6 +1034,9 @@ class YoutubeManager:
                     results = await self._ytm_search(query, limit, fast)
                 except Exception as e:
                     logger.warning(f"YouTube Music axtarışı alınmadı: {e}")
+                    results = []
+                if results and not explicit and search_mode() == "auto" and not ytm_relevant(query, results):
+                    logger.info(f"YT Music nəticələri sorğuya uyğun deyil, YouTube göstərilir: {query!r}")
                     results = []
                 if results:
                     SEARCH_STATS["ytm"] += 1

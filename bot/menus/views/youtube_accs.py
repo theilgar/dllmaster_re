@@ -456,14 +456,22 @@ def search_source_view(note: str = "") -> tuple[str, InlineKeyboardMarkup]:
         return f"❌ youtube_handler yüklənmədi: <code>{escape(str(e))[:200]}</code>", InlineKeyboardMarkup(
             inline_keyboard=[nav_row("yt")]
         )
+    from bot.core.youtube_handler import search_mode
     cur = search_source()
-    text = f"🔎 <b>Axtarış mənbəyi</b>\n━━━━━━━━━━━━━━━━━━\n📌 <b>Hazırda:</b> {SEARCH_SOURCES.get(cur, cur)}\n"
+    auto = search_mode() == "auto"
+    text = (f"🔎 <b>Axtarış mənbəyi</b>\n━━━━━━━━━━━━━━━━━━\n"
+            f"📌 <b>Hazırda:</b> {SEARCH_SOURCES.get(cur, cur)}\n"
+            f"⚙️ <b>Rejim:</b> {'🤖 Avto' if auto else '✋ Manual'}\n\n"
+            + ("<i>🤖 Avto: əvvəl YouTube Music; nəticələr sorğuya uyğun deyilsə YouTube göstərilir.</i>" if auto else
+               "<i>✋ Manual: yalnız seçdiyiniz mənbə (YT Music-də heç nə tapılmasa YouTube ehtiyat kimi göstərilir).</i>"))
     if note:
-        text += f"\nℹ️ {note}"
-    skeys = list(SEARCH_SOURCES)                                     # tək düymə: hər basışda növbəti mənbə
+        text += f"\n\nℹ️ {note}"
+    skeys = list(SEARCH_SOURCES)                                     # tək düymə: hər basışda növbəti mənbə (→ Manual)
     nxt = next_of(skeys, cur)
     btn_cycle = panel.btn(f"{SEARCH_SOURCES.get(cur, cur)}  ›  {SEARCH_SOURCES[nxt]}", f"menu:srch:{nxt}")
-    kb = InlineKeyboardMarkup(inline_keyboard=[[btn_cycle], nav_row("yt", refresh="srch")])
+    btn_mode = (panel.btn(f"✋ Manual-a keç ({SEARCH_SOURCES.get(cur, cur)})", f"menu:srch:{cur}") if auto
+                else panel.btn("🤖 Avto-ya keç", "menu:srch:auto"))
+    kb = InlineKeyboardMarkup(inline_keyboard=[[btn_cycle], [btn_mode], nav_row("yt", refresh="srch")])
     return text, kb
 
 

@@ -122,6 +122,8 @@ async def setup(context):
     context.dp.message.middleware(CommandLoggerMiddleware())
     ignore_userbot_commands(context)            # ".alive" kimi userbot komandalarına bot cavab verməsin
     ignore_stale_callbacks(context)             # "query is too old" — gec düymə cavabı handler-i qırmasın
+    from bot.core import latency
+    latency.install(context)                    # ⏱ düymə / komanda cavab müddəti (⚙️ Performans-da görünür)
     set_language(context)                       # 🌐 istifadəçinin dili (common/i18n.py)
     from bot.core import inline_panels
     inline_panels.install_creator_guard(context)   # ⛔ sahib panelləri — hər handler-də ayrıca yoxlamaq lazım deyil

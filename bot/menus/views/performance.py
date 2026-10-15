@@ -160,6 +160,9 @@ def perf_hub_view(note: str = "") -> tuple[str, InlineKeyboardMarkup]:
         ago = int(time.time() - ts)
         lines.append(f"     Son donma: <b>{dur:.1f} san.</b>, {ago} san. əvvəl")
 
+    from bot.core import latency
+    lines += latency.summary_lines()
+
     turbo = getattr(cp, "turbo_on", getattr(cp, "is_turbo", lambda: False))()
     scale = getattr(cp, "autoscale_on", getattr(cp, "is_auto_scaling", lambda: False))()
     lines.append(f"🔥 <b>Rejim:</b> {'🔥 Turbo' if turbo else 'Standart'} · <b>{cp.CORES} CPU nüvə</b>")
