@@ -78,6 +78,9 @@ async def _mcb_perf(cb: CallbackQuery, parts: list, action: str):
         else:
             cp.set_mode(cp.mode())
             await cb.answer("✋ Manual — rejimi özün seç")
+    elif sub in ("tauto", "nauto") and cp.turbo_on():
+        await cb.answer("🔥 Tam performans açıqdır — dəyərləri o idarə edir. Avto üçün əvvəlcə onu söndürün.", show_alert=True)
+        return
     elif sub == "tauto" and arg in ("auto", "manual"):
         cp.set_threads_auto(arg == "auto")
         await cb.answer("🤖 Avto: thread sayını bot tənzimləyir" if arg == "auto" else "✋ Manual — thread sayını özün seç")

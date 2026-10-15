@@ -27,6 +27,7 @@ import itertools
 import logging
 import os
 import pickle
+import shutil
 import struct
 import sys
 import tempfile
@@ -414,7 +415,10 @@ def toggle_watchdog() -> bool:
 # söndürəndə olduğu kimi qaytarılır.
 S_TURBO, S_TURBO_PREV = "perf:turbo", "perf:turbo_prev"
 S_BATCH_PAR = "dl:batch_parallel"            # bot/core/youtube_handler.py — toplu yükləmədə paralel
-TURBO_KEYS = (S_MODE, S_USER, S_DEPO, S_THREADS, S_NICE, S_SCALE, S_TARGET, S_RESERVE, S_BATCH_PAR)
+TURBO_KEYS = (S_MODE, S_USER, S_DEPO, S_THREADS, S_NICE, S_SCALE, S_TARGET, S_RESERVE, S_BATCH_PAR,
+              S_THREADS_AUTO, S_NICE_AUTO)
+# 🚀 Sürətləndirmə ayarları (Menyu → Performans): turbo hamısını açır, Avto-nu söndürür; söndürəndə qaytarılır
+TURBO_ACCEL = ("opt:accel_auto", "opt:l1_cache", "opt:ram_disk", "opt:smart_copy", "opt:parallel_dl")
 
 
 def turbo_on() -> bool:
@@ -431,7 +435,7 @@ def turbo_plan(avail_mb: int = 0) -> dict:
     thr = min(256, max(128, CORES * 16))          # çox thread = GIL rəqabəti → event loop ləngiyir (donma)
     thr = max(x for x in THREAD_STEPS if x <= thr)
     return {S_MODE: "process" if CORES > 1 else "thread", S_USER: user, S_DEPO: depo, S_THREADS: thr,
-            S_NICE: 0, S_SCALE: "on", S_TARGET: 100, S_RESERVE: 256, S_BATCH_PAR: min(10, max(4, CORES // 2))}
+            S_NICE: 0, S_THREADS_AUTO: "off", S_NICE_AUTO: "off", S_SCALE: "on", S_TARGET: 100, S_RESERVE: 256, S_BATCH_PAR: min(10, max(4, CORES // 2))}
 
 
 def _apply_live():
@@ -440,14 +444,32 @@ def _apply_live():
     apply_threads(force=True)
 
 
+def _apply_accel(vals: dict):
+    """opt:* sürətləndirmə ayarlarını öz setter-ləri ilə tətbiq et (yaddaş override-ları da yenilənir). None → default."""
+    from bot.core import audio_cache, youtube_handler as yh
+    from common import utilities as cu
+    on = lambda k: vals.get(k) != "0"                    # None / "1" → aktiv (defoltlar aktivdir)
+    cu.set_accel_auto_enabled(on("opt:accel_auto"))
+    audio_cache.set_l1_cache_enabled(on("opt:l1_cache"))
+    cu.set_ram_disk_enabled(on("opt:ram_disk"))
+    yh.set_smart_copy_enabled(on("opt:smart_copy"))
+    yh.set_parallel_dl_enabled(on("opt:parallel_dl"))
+
+
 def enable_turbo(avail_mb: int = 0) -> dict:
     if not turbo_on():                                   # əvvəlki vəziyyət (yalnız ilk dəfə)
-        prev = {k: _db().get_setting(k) for k in TURBO_KEYS}
+        prev = {k: _db().get_setting(k) for k in TURBO_KEYS + TURBO_ACCEL}
         _set(S_TURBO_PREV, json.dumps(prev))
     plan = turbo_plan(avail_mb)
     for k, v in plan.items():
         _set(k, v)
     _set(S_TURBO, "on")
+    try:
+        ram_ok = shutil.disk_usage("/dev/shm").free >= 300 * 1024 * 1024
+    except OSError:
+        ram_ok = False
+    _apply_accel({"opt:accel_auto": "0", "opt:l1_cache": "1", "opt:smart_copy": "1", "opt:parallel_dl": "1",
+                  "opt:ram_disk": "1" if ram_ok else "0"})
     _apply_live()
     MON.event(f"🔥 Tam performans: 👤{plan[S_USER]} 📦{plan[S_DEPO]} 🧵{plan[S_THREADS]} nice 0")
     return plan
@@ -461,6 +483,10 @@ def disable_turbo() -> dict:
     for k in TURBO_KEYS:
         _db().set_setting(k, prev.get(k))                # None → ayar silinir (default-a qayıdır)
     _set(S_TURBO, "off")
+    try:
+        _apply_accel({k: prev.get(k) for k in TURBO_ACCEL})
+    except Exception as e:
+        logger.warning(f"Sürətləndirmə ayarları qaytarılmadı: {e!r}")
     _apply_live()
     MON.event("🔥 Tam performans söndürüldü — əvvəlki ayarlar qaytarıldı")
     return prev

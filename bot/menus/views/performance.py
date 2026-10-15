@@ -255,6 +255,9 @@ def perf_hub_view(note: str = "") -> tuple[str, InlineKeyboardMarkup]:
             )
     t_btn = f"🧵 Thread: {cp.threads()}" + (f" ({t_act} aktiv)" if t_act else "")
     t_auto, n_auto = cp.threads_auto(), cp.nice_auto()
+    if cp.turbo_on():
+        lines.append("🔥 <i>Tam performans açıqdır: thread və nice Avto işləmir (turbo öz dəyərlərini qoyur). "
+                     "Avto üçün turbonu söndürün.</i>")
     rows += [
         [
             panel.mode(f"🧵 Thread {cp.threads()}" if t_auto else "🧵 Thread", t_auto,
@@ -317,7 +320,7 @@ def perf_cores_view() -> tuple[str, InlineKeyboardMarkup]:
         lines.append(wrap_ui_text(escape("\n".join(pairs))))
         busy = sum(1 for v in mon.cores if v >= 80)
         idle = sum(1 for v in mon.cores if v < 20)
-        lines.append(f"🔥 dolu (≥80%): {busy} · 💤 boş (<20%): {idle}")
+        lines.append(f"🔥 dolu (≥80%): {busy} · 💤 boş (&lt;20%): {idle}")
     lines.append(f"🤖 bot: {mon.bot_cpu:.0f}% · ⚙️ işçilər+ffmpeg: {mon.work_cpu:.0f}% <i>(maşının %-i)</i>")
     try:
         l1, l5, l15 = os.getloadavg()

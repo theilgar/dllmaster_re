@@ -103,3 +103,32 @@ def test_perf_buttons_use_handled_callbacks():
     assert not any(d.endswith(":tog") for d in data)
     for pat in ("menu:perf:asm:", "menu:perf:tauto:", "menu:perf:nauto:", "menu:perf:mode:"):
         assert any(d.startswith(pat) for d in data), pat
+
+
+def test_turbo_applies_and_restores_accel(monkeypatch):
+    import json
+    from bot.core import audio_cache, youtube_handler as yh
+    from common import utilities as cu
+    db = {"opt:accel_auto": None, "opt:l1_cache": "0", cp.S_THREADS_AUTO: "on"}
+
+    class DB:
+        def get_setting(self, k, d=None): return db.get(k, d)
+        def set_setting(self, k, v): db[k] = v
+
+    calls = {}
+    monkeypatch.setattr(cp, "_db", lambda: DB())
+    monkeypatch.setattr(cp, "_get", lambda k, d=None: db.get(k) if db.get(k) not in (None, "") else d)
+    monkeypatch.setattr(cp, "_set", lambda k, v: db.__setitem__(k, str(v)))
+    monkeypatch.setattr(cp, "_apply_live", lambda: None)
+    monkeypatch.setattr(cp.MON, "event", lambda t: None)
+    monkeypatch.setattr(cu, "set_accel_auto_enabled", lambda v: calls.__setitem__("auto", v))
+    monkeypatch.setattr(audio_cache, "set_l1_cache_enabled", lambda v: calls.__setitem__("l1", v))
+    monkeypatch.setattr(cu, "set_ram_disk_enabled", lambda v: calls.__setitem__("ram", v))
+    monkeypatch.setattr(yh, "set_smart_copy_enabled", lambda v: calls.__setitem__("sc", v))
+    monkeypatch.setattr(yh, "set_parallel_dl_enabled", lambda v: calls.__setitem__("pdl", v))
+    cp.enable_turbo(4096)
+    assert calls["auto"] is False and calls["l1"] and calls["sc"] and calls["pdl"]
+    assert db[cp.S_THREADS_AUTO] == "off" and db[cp.S_NICE_AUTO] == "off"
+    cp.disable_turbo()
+    assert calls["auto"] is True and calls["l1"] is False          # əvvəlki: Avto (None) və L1 "0"
+    assert db[cp.S_THREADS_AUTO] == "on"
