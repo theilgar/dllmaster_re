@@ -129,6 +129,20 @@ async def _mcb_perf(cb: CallbackQuery, parts: list, action: str):
         await cp.restart_pools()
         await cb.answer("♻️ Proseslər bağlandı — növbəti tapşırıqda yeniləri açılacaq")
         note = "♻️ <i>Bütün işçi proseslər yeniləndi (yeni nice / ölçü tətbiq olundu)</i>"
+    elif sub == "lowres":
+        if cp.lowres_on():
+            await asyncio.to_thread(cp.disable_lowres)
+            await cb.answer("🪶 Söndürüldü — əvvəlki ayarlar qaytarıldı")
+            note = "↩️ <b>Aşağı resurs profili söndürüldü</b> — əvvəlki ayarlar bərpa olundu"
+        else:
+            had_turbo = cp.turbo_on()
+            await asyncio.to_thread(cp.enable_lowres)
+            await cb.answer("🪶 Aşağı resurs profili açıldı")
+            note = (("↩️ Tam performans söndürüldü.\n" if had_turbo else "")
+                    + "🪶 <b>Aşağı resurs:</b> 👤 2 · 📦 2 proses · RAM ehtiyatı 768 MB · CPU hədəfi 85% · "
+                    "RAM diski və paralel fraqment söndürülüb · toplu 2 paralel · 🧵/🐢 Avto\n"
+                    "<i>♻️ Prosesləri yenilə — açıq proseslərə də tətbiq olunsun. "
+                    "DB hovuzu üçün <code>DB_POOL_MAX=12</code> (.env) tövsiyə olunur.</i>")
     elif sub == "turbo":
         if getattr(cp, "turbo_on", lambda: False)():
             await asyncio.to_thread(cp.disable_turbo)

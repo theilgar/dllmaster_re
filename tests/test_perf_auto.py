@@ -132,3 +132,60 @@ def test_turbo_applies_and_restores_accel(monkeypatch):
     cp.disable_turbo()
     assert calls["auto"] is True and calls["l1"] is False          # əvvəlki: Avto (None) və L1 "0"
     assert db[cp.S_THREADS_AUTO] == "on"
+
+
+def test_lowres_enable_disable_roundtrip(monkeypatch):
+    from bot.core import audio_cache, youtube_handler as yh
+    from common import utilities as cu
+    db = {cp.S_USER: "6", cp.S_RESERVE: None, "opt:ram_disk": "1"}
+
+    class DB:
+        def get_setting(self, k, d=None): return db.get(k, d)
+        def set_setting(self, k, v): db[k] = v
+
+    calls = {}
+    monkeypatch.setattr(cp, "_db", lambda: DB())
+    monkeypatch.setattr(cp, "_get", lambda k, d=None: db.get(k) if db.get(k) not in (None, "") else d)
+    monkeypatch.setattr(cp, "_set", lambda k, v: db.__setitem__(k, str(v)))
+    monkeypatch.setattr(cp, "_apply_live", lambda: None)
+    monkeypatch.setattr(cp.MON, "event", lambda t: None)
+    monkeypatch.setattr(cu, "set_accel_auto_enabled", lambda v: calls.__setitem__("auto", v))
+    monkeypatch.setattr(audio_cache, "set_l1_cache_enabled", lambda v: calls.__setitem__("l1", v))
+    monkeypatch.setattr(cu, "set_ram_disk_enabled", lambda v: calls.__setitem__("ram", v))
+    monkeypatch.setattr(yh, "set_smart_copy_enabled", lambda v: calls.__setitem__("sc", v))
+    monkeypatch.setattr(yh, "set_parallel_dl_enabled", lambda v: calls.__setitem__("pdl", v))
+    cp.enable_lowres()
+    assert cp.lowres_on() and db[cp.S_USER] == "2" and db[cp.S_RESERVE] == "768"
+    assert calls["ram"] is False and calls["pdl"] is False
+    cp.disable_lowres()
+    assert not cp.lowres_on() and db[cp.S_USER] == "6" and db[cp.S_RESERVE] is None
+    assert calls["ram"] is True                                      # əvvəlki "1"
+
+
+def _prof_env(monkeypatch, cores, ram):
+    db = {}
+    monkeypatch.setattr(cp, "_get", lambda k, d=None: db.get(k) if db.get(k) not in (None, "") else d)
+    monkeypatch.setattr(cp, "_set", lambda k, v: db.__setitem__(k, str(v)))
+    monkeypatch.setattr(cp, "CORES", cores)
+    monkeypatch.setattr(cp, "_RAM_TOTAL_MB", [ram])
+    calls = []
+    monkeypatch.setattr(cp, "enable_lowres", lambda: calls.append(1))
+    monkeypatch.setattr(cp, "turbo_on", lambda: db.get(cp.S_TURBO) == "on")
+    return db, calls
+
+
+def test_auto_profile_small_server(monkeypatch):
+    db, calls = _prof_env(monkeypatch, 2, 2048)
+    assert cp.auto_profile() == "lowres" and calls and db[cp.S_AUTOPROFILE] == "done"
+    assert cp.auto_profile() == "skip" and len(calls) == 1          # bir dəfə
+
+
+def test_auto_profile_big_server_untouched(monkeypatch):
+    db, calls = _prof_env(monkeypatch, 16, 32768)
+    assert cp.auto_profile() == "default" and not calls
+
+
+def test_auto_profile_respects_existing_choice(monkeypatch):
+    db, calls = _prof_env(monkeypatch, 2, 1024)
+    db[cp.S_TURBO] = "on"
+    assert cp.auto_profile() == "skip" and not calls

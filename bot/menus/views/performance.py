@@ -110,6 +110,7 @@ PERF_INFO = {
     "c": "🎯 CPU hədəfi: Avto-miqyas üçün CPU faiz həddi.",
     "r": "💾 RAM ehtiyatı: Serveri OOM qəzasından qoruyan ehtiyat RAM.",
     "n": "🐢 nice: İşçi proseslərin prioriteti (0-19).",
+    "lowres": "🪶 Aşağı resurs profili: 👤2 + 📦2 proses, RAM ehtiyatı 768 MB, CPU hədəfi 85%, RAM diski və paralel fraqmentlər söndürülür, toplu yükləmə 2 paralel, thread/nice Avto. Söndürəndə əvvəlki ayarlar qayıdır. Turbo ilə birlikdə işləmir.",
     "auto": "🤖 Avto: 🧵 thread sayı növbə və bot gecikməsinə görə artıb-azalır; 🐢 nice bot ləngiyəndə artır (işçilər botu sıxmasın), sakitləşəndə +5-ə qayıdır. Turbo açıq olanda əl ilə dəyərlər keçərlidir.",
 }
 
@@ -227,6 +228,7 @@ def perf_hub_view(note: str = "") -> tuple[str, InlineKeyboardMarkup]:
     rows.extend(
         [
             [panel.toggle("🔥 Tam performans", turbo, "menu:perf:turbo"), _btn("ℹ️", "perf:info:turbo")],
+            [panel.toggle("🪶 Aşağı resurs (2 GB / 2 nüvə)", cp.lowres_on(), "menu:perf:lowres"), _btn("ℹ️", "perf:info:lowres")],
             [
                 panel.btn(
                     "Rejim: 🧠 Proses  ›  🧵 Thread" if m == "process" else "Rejim: 🧵 Thread  ›  🧠 Proses",

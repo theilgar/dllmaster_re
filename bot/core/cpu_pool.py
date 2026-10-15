@@ -456,7 +456,87 @@ def _apply_accel(vals: dict):
     yh.set_parallel_dl_enabled(on("opt:parallel_dl"))
 
 
+# ───────────────────────── 🪶 Aşağı resurs profili (2 GB RAM / 2 nüvə kimi kiçik serverlər) ─────────────────────────
+S_LOWRES, S_LOWRES_PREV = "perf:lowres", "perf:lowres_prev"
+
+
+def lowres_on() -> bool:
+    return _get(S_LOWRES) == "on"
+
+
+def lowres_plan() -> dict:
+    return {S_MODE: default_mode(), S_USER: min(2, USER_STEPS[-1]), S_DEPO: 2,
+            S_THREADS: 64, S_NICE: 10, S_THREADS_AUTO: "on", S_NICE_AUTO: "on", S_SCALE: "on", S_TARGET: 85,
+            S_RESERVE: 768, S_BATCH_PAR: 2}
+
+
+def enable_lowres() -> dict:
+    """RAM/CPU qənaəti: az proses, RAM ehtiyatı 768 MB, RAM diski və paralel fraqmentlər söndürülür,
+    thread/nice Avto. Əvvəlki ayarlar saxlanır — söndürəndə qaytarılır. Turbo açıqdırsa əvvəl o söndürülür."""
+    if turbo_on():
+        disable_turbo()
+    if not lowres_on():
+        prev = {k: _db().get_setting(k) for k in tuple(lowres_plan()) + TURBO_ACCEL}
+        _set(S_LOWRES_PREV, json.dumps(prev))
+    plan = lowres_plan()
+    for k, v in plan.items():
+        _set(k, v)
+    _set(S_LOWRES, "on")
+    _apply_accel({"opt:accel_auto": "0", "opt:l1_cache": "1", "opt:smart_copy": "1",
+                  "opt:parallel_dl": "0", "opt:ram_disk": "0"})
+    _AUTO.update(threads=None, nice=None, idle=0, calm=0)
+    _apply_live()
+    MON.event("🪶 Aşağı resurs profili: 👤2 📦2 proses, RAM ehtiyatı 768 MB, RAM diski söndürüldü")
+    return plan
+
+
+def disable_lowres() -> dict:
+    try:
+        prev = json.loads(_get(S_LOWRES_PREV) or "{}")
+    except ValueError:
+        prev = {}
+    for k in lowres_plan():
+        _db().set_setting(k, prev.get(k))
+    _set(S_LOWRES, "off")
+    try:
+        _apply_accel({k: prev.get(k) for k in TURBO_ACCEL})
+    except Exception as e:
+        logger.warning(f"Sürətləndirmə ayarları qaytarılmadı: {e!r}")
+    _AUTO.update(threads=None, nice=None, idle=0, calm=0)
+    _apply_live()
+    MON.event("🪶 Aşağı resurs profili söndürüldü — əvvəlki ayarlar qaytarıldı")
+    return prev
+
+
+S_AUTOPROFILE = "perf:autoprofile"          # "done" — ilk işə salınmada seçim edilib, bir də toxunulmur
+LOWRES_RAM_MB, LOWRES_CORES = 3072, 2
+
+
+def auto_profile() -> str:
+    """İlk işə salınmada serveri yoxla: RAM ≤ 3 GB və ya ≤ 2 nüvə → 🪶 Aşağı resurs profili açılır.
+    Yalnız BİR DƏFƏ (sonra istifadəçinin seçiminə toxunulmur); əvvəldən turbo / aşağı resurs / əl ilə ölçü
+    seçilibsə heç nə dəyişmir. Nəticə: 'lowres' | 'default' | 'skip'."""
+    if _get(S_AUTOPROFILE):
+        return "skip"
+    ram = _total_ram_mb()
+    if turbo_on() or lowres_on():
+        _set(S_AUTOPROFILE, "done")
+        return "skip"
+    small = CORES <= LOWRES_CORES or (0 < ram <= LOWRES_RAM_MB)
+    if small:
+        enable_lowres()
+        _set(S_AUTOPROFILE, "done")
+        logger.info(f"🪶 Avto-profil: server kiçikdir ({CORES} nüvə, {ram} MB RAM) → Aşağı resurs profili açıldı "
+                    "(Performans panelindən söndürmək olar)")
+        return "lowres"
+    _set(S_AUTOPROFILE, "done")
+    logger.info(f"⚙️ Avto-profil: server kifayətdir ({CORES} nüvə, {ram} MB RAM) → standart ayarlar")
+    return "default"
+
+
 def enable_turbo(avail_mb: int = 0) -> dict:
+    if lowres_on():
+        disable_lowres()
     if not turbo_on():                                   # əvvəlki vəziyyət (yalnız ilk dəfə)
         prev = {k: _db().get_setting(k) for k in TURBO_KEYS + TURBO_ACCEL}
         _set(S_TURBO_PREV, json.dumps(prev))
@@ -1212,6 +1292,10 @@ def init(context=None):
             return
         loop = asyncio.get_running_loop()
         _started = True
+        try:
+            auto_profile()
+        except Exception as e:
+            logger.warning(f"Avto-profil seçilmədi: {e!r}")
         apply_threads()
         WATCHDOG.start(loop)
         global _scaler_task
