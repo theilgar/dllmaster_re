@@ -61,6 +61,18 @@ from common.utilities import BASE_DIR, get_tz
 
 logger = logging.getLogger(__name__)
 
+async def delete_messages(bot, chat_id: int, mids) -> int:
+    """Mesajları silir (təkrar / boş id-lər atılır, xətalar udulur) → silinənlərin sayı."""
+    n = 0
+    for mid in dict.fromkeys(m for m in (mids or []) if m):
+        try:
+            await bot.delete_message(chat_id, mid)
+            n += 1
+        except Exception as e:
+            logger.debug(f"Mesaj silinmədi ({mid}): {e}")
+    return n
+
+
 def setup(context):
     creator = context.creator_id
     started = time.time()
@@ -68,7 +80,7 @@ def setup(context):
     bot = context.bot
     root = Path(BASE_DIR)
     push_lock = asyncio.Lock()
-    gh_state = {"await_msg": None}
+    gh_state = {"await_msg": None, "prompt_mid": None, "reply_mid": None}     # son iki əlavə mesajın id-si (təmizlik üçün)
     gh_full = {
         "message": None, "await": False, "chat_id": None, "panel_id": None,
         "selected": None, "items": [], "page": 0,
@@ -95,6 +107,13 @@ def setup(context):
         except Exception as e:
             if "not modified" not in str(e):
                 logger.debug(f"Hesabat düymələri yenilənmədi: {e}")
+
+    async def drop_aux(extra_mid=None):
+        """Commit mesajı axınının əlavə mesajları (sorğu və «yeniləndi» cavabı, düymələri ilə) silinir — köhnə düymələr qalmasın.
+        Əsas hesabatın özü qalır: onun düymələri set_report_kb ilə yenilənir."""
+        mids = [gh_state.get("prompt_mid"), gh_state.get("reply_mid"), extra_mid]
+        gh_state["prompt_mid"] = gh_state["reply_mid"] = None
+        await delete_messages(bot, creator, mids)
 
     NAV_TO = {"ghf:open": "GitHub", "menu:dev": "Bot idarəsi", "ghs:menu": "GitHub ayarları", "ghs:key": "SSH açarı", "ghf:pick": "Fayllar"}
 
@@ -342,17 +361,15 @@ def setup(context):
             await asyncio.to_thread(save_pending, None)
             await cb.answer("İmtina edildi")
             await set_report_kb(p, status_kb("❌ GitHub-a göndərilmədi"))
-            if cb.message.message_id != p["message_id"]:
-                try:
-                    await cb.message.edit_reply_markup(reply_markup=None)
-                except Exception as _e:
-                    logger.debug("udulan xəta [bot/plugins/update_notifier_plugin.py:1187]: %r", _e)
+            await drop_aux(cb.message.message_id if cb.message.message_id != p["message_id"] else None)
+            await delete_messages(bot, creator, p.get("old_mids"))        # birləşmiş köhnə hesabatlar
             return
 
         if action == "msg":
             gh_state["await_msg"] = pid
             await cb.answer()
-            await bot.send_message(
+            await drop_aux()                                  # əvvəlki sorğu / cavab qalmasın
+            prompt = await bot.send_message(
                 creator,
                 "✏️ <b>Commit mesajını yazın</b>\n\n"
                 f"Hazırkı:\n<pre>{escape(p['message'])}</pre>",
@@ -361,15 +378,13 @@ def setup(context):
                     InlineKeyboardButton(text="↩️ Olduğu kimi saxla", callback_data=f"gh:keep:{pid}")
                 ]]),
             )
+            gh_state["prompt_mid"] = prompt.message_id
             return
 
         if action == "keep":
             gh_state["await_msg"] = None
             await cb.answer()
-            try:
-                await cb.message.edit_reply_markup(reply_markup=None)
-            except Exception as _e:
-                logger.debug("udulan xəta [bot/plugins/update_notifier_plugin.py:1210]: %r", _e)
+            await drop_aux(cb.message.message_id)             # sorğu mesajı silinir, yalnız hesabat qalır
             return
 
         if action == "push":
@@ -378,6 +393,7 @@ def setup(context):
                 return
             await cb.answer("Göndərilir...")
             gh_state["await_msg"] = None
+            await drop_aux(cb.message.message_id if cb.message.message_id != p["message_id"] else None)
             async with push_lock:
                 await set_report_kb(p, status_kb("⏳ GitHub-a göndərilir..."))
                 paths = p["files"].get("changed", []) + p["files"].get("added", []) + p["files"].get("removed", [])
@@ -390,6 +406,7 @@ def setup(context):
                 if res["ok"]:
                     await asyncio.to_thread(save_pending, None)
                     await set_report_kb(p, status_kb(f"✅ GitHub-da: {res['hash']}", res.get("url")))
+                    await delete_messages(bot, creator, p.get("old_mids"))    # birləşmiş köhnə hesabatlar və diff faylları
                     lines = [
                         "✅ <b>GitHub-a göndərildi</b>",
                         f"🌿 Branch: <code>{escape(res['branch'])}</code> · commit <code>{escape(res['hash'])}</code>",
@@ -509,11 +526,18 @@ def setup(context):
             return
         p["message"] = message.text.strip()[:2000]
         await asyncio.to_thread(save_pending, p)
-        await message.reply(
+        await drop_aux()                                      # sorğu və əvvəlki cavab silinir
+        try:
+            await message.delete()                            # istifadəçinin yazdığı mətn də qalmasın
+        except Exception as e:
+            logger.debug(f"Commit mesajı silinmədi: {e}")
+        reply = await bot.send_message(
+            creator,
             f"✏️ <b>Commit mesajı yeniləndi:</b>\n<pre>{escape(p['message'])}</pre>",
             parse_mode="HTML",
             reply_markup=gh_kb(pid),
         )
+        gh_state["reply_mid"] = reply.message_id
 
     # ═════════════ 📦 Full update & Seçim Panelləri ═════════════
     def changes_block(changes, excluded, limit=25, skipped=0, title="Dəyişikliklər") -> str:
@@ -983,6 +1007,7 @@ def setup(context):
                     if not pend & set(res.get("remaining", [])):
                         await asyncio.to_thread(save_pending, None)
                         await set_report_kb(p, status_kb(f"✅ GitHub-da: {res['hash']}", res.get("url")))
+                        await delete_messages(bot, creator, p.get("old_mids"))
                 lines = [
                     ("✅ <b>Seçilən fayllar GitHub-a göndərildi</b>\n" if selected is not None
                      else "✅ <b>Tam yeniləmə GitHub-a göndərildi</b>\n"),
@@ -1362,6 +1387,7 @@ def setup(context):
                     ]])
             except Exception as _e:
                 logger.debug("udulan xəta [bot/updater/handlers.py:1275]: %r", _e)
+        sent_doc = None
         try:
             ctx = cui.raw() if cui is not None else contextlib.nullcontext()
             with ctx:                                   # mətn artıq istənilən formadadır — middleware toxunmasın
@@ -1371,7 +1397,7 @@ def setup(context):
                 )
             if diff_doc:
                 stamp = datetime.fromtimestamp(started, get_tz()).strftime("%Y%m%d_%H%M")
-                await context.bot.send_document(
+                sent_doc = await context.bot.send_document(
                     creator,
                     BufferedInputFile(diff_doc.encode("utf-8"), filename=f"update_{stamp}.diff"),
                     caption="📄 Tam diff",
@@ -1384,6 +1410,11 @@ def setup(context):
         if pending:
             prev = pending.pop("prev", None)
             pending["message_id"] = sent.message_id
+            pending["diff_mid"] = sent_doc.message_id if sent_doc else None
+            olds = list((prev or {}).get("old_mids") or [])
+            if prev:                                          # əvvəlki hesabat və onun diff faylı: GitHub-a göndərəndə silinəcək
+                olds += [prev.get("message_id"), prev.get("diff_mid")]
+            pending["old_mids"] = [m for m in dict.fromkeys(olds) if m]
             await asyncio.to_thread(save_pending, pending)
             if prev and prev.get("message_id"):
                 await set_report_kb(prev, status_kb("↪️ Növbəti yeniləmə ilə birləşdi"))
