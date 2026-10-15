@@ -1,15 +1,16 @@
 """📨 .istek — qrupa gələn qoşulma istəklərinə baxmaq, rədd və qəbul etmək (saxta Telethon client ilə)."""
 import asyncio
 import types
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 import pytest
 from telethon.errors import ChatAdminRequiredError, FloodWaitError, RPCError
 from telethon.tl.types import Channel, Chat, ChatInviteImporter, ChatPhotoEmpty, InputUserEmpty, User
 
 import userbot.plugins.join_requests as jr
+from tests import userbot_fakes as fakes
 
-T0 = datetime(2026, 10, 16, 1, 0, tzinfo=timezone.utc)
+T0 = fakes.T0
 
 
 def channel():
@@ -160,48 +161,13 @@ async def test_resolve_some_stops_on_cancel_and_reports_admin_errors():
 
 
 # ───────────────────────── komandanın özü ─────────────────────────
-class FakeUB:
-    def __init__(self):
-        self.handlers, self.tracked = {}, []
-
-    def command(self, name, pattern=None, help=None, **kw):
-        def deco(fn):
-            self.handlers[name] = (pattern, fn)
-            return fn
-        return deco
-
-    def track(self, chat_id, kind, task):
-        self.tracked.append(task)
-
-
-class FakeEvent:
-    def __init__(self, client, chat):
-        self.client, self._chat, self.chat_id, self.edits = client, chat, 77, []
-        self.pattern_match = None
-
-    async def get_chat(self):
-        return self._chat
-
-    async def edit(self, text, **kw):
-        self.edits.append(text)
-
-
 async def run_command(ub, client, text, chat=None):
-    import re
-    pattern, fn = ub.handlers["istek"]
-    ev = FakeEvent(client, chat or channel())
-    ev.pattern_match = re.match(pattern, text)
-    assert ev.pattern_match, f"pattern uyğun gəlmədi: {text}"
-    await fn(ev)
-    for t in ub.tracked:
-        await t
-    ub.tracked.clear()
-    return ev
+    return await fakes.run_command(ub, "istek", text, client, chat=chat or channel())
 
 
 @pytest.fixture
 def ub():
-    u = FakeUB()
+    u = fakes.FakeUB()
     jr.register(u)
     return u
 
@@ -209,7 +175,7 @@ def ub():
 def test_command_pattern_accepts_both_spellings():
     import re
     pat = r"^\.ist[eə]k(?:\s+(\S+))?(?:\s+(\d+))?$"
-    ub_ = FakeUB()
+    ub_ = fakes.FakeUB()
     jr.register(ub_)
     assert ub_.handlers["istek"][0] == pat
     for text, g1, g2 in ((".istek", None, None), (".istək", None, None), (".istek sil", "sil", None),
@@ -274,7 +240,7 @@ async def test_output_follows_ui_box_style(monkeypatch, style, open_tag):
     monkeypatch.setattr(jr, "box_text", box_text)
     monkeypatch.setattr(menu, "_UI_STYLE_OVERRIDE", style)
     monkeypatch.setattr(cui, "_on", lambda key: True)
-    ub = FakeUB()
+    ub = fakes.FakeUB()
     jr.register(ub)
 
     ev = await run_command(ub, FakeClient(12), ".istek")

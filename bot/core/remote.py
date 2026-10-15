@@ -78,8 +78,11 @@ def enabled() -> bool:
 
 
 def set_enabled(on: bool) -> bool:
+    """Ana açar. Söndürüləndə hər şey evdə görülür — server üçün gözləyən işlər də dərhal evə buraxılır."""
     _S.put("on", "1" if on else "0")
     mark_up()
+    if not on:
+        resolve_gate("home")
     return on
 
 
@@ -266,14 +269,35 @@ def release(kind: str, lane: str = "depo"):
 
 
 # ───────────────────────── nəqliyyat ─────────────────────────
-def _argv(cmd: str) -> list:
+# sshd standart olaraq bir bağlantıda cəmi 10 sessiyaya icazə verir (MaxSessions). Qısa əmrlər ortaq (multiplex) bağlantıdan
+# keçir və burada saxlanılan say həddindən aşağıdır; uzunömürlü işçilər isə hər biri ÖZ bağlantısı ilə açılır.
+SHORT_SESSIONS = 4                    # eyni anda qısa əmr (yoxlama, proqres, fayl yazmaq / silmək)
+PULL_SESSIONS = 3                     # eyni anda faylı evə çəkmə
+SPAWN_PARALLEL = 3                    # eyni anda yeni işçi bağlantısı (sshd MaxStartups: çoxlu eyni vaxtlı qoşulma rədd olunur)
+_sems = {}
+
+
+def _sem(name: str, n: int) -> asyncio.Semaphore:
+    key = (name, id(asyncio.get_running_loop()))
+    if key not in _sems:
+        _sems[key] = asyncio.Semaphore(n)
+    return _sems[key]
+
+
+def spawn_slot():
+    """async with remote.spawn_slot(): — işçi bağlantıları bir-bir (üçlü qruplarla) açılsın."""
+    return _sem("spawn", SPAWN_PARALLEL)
+
+
+def _argv(cmd: str, mux: bool = True) -> list:
     if _local_transport():
         return ["bash", "-c", cmd]
+    share = (["-o", "ControlMaster=auto", "-o", "ControlPersist=10m",
+              "-o", f"ControlPath={os.path.join(tempfile.gettempdir(), 'dlm-ssh-%C')}"] if mux
+             else ["-o", "ControlMaster=no", "-o", "ControlPath=none"])
     a = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
          "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
-         "-o", "StrictHostKeyChecking=accept-new",
-         "-o", "ControlMaster=auto", "-o", "ControlPersist=10m",
-         "-o", f"ControlPath={os.path.join(tempfile.gettempdir(), 'dlm-ssh-%C')}",
+         "-o", "StrictHostKeyChecking=accept-new", *share,
          "-p", str(port())]
     if key():
         a += ["-i", key()]
@@ -286,7 +310,8 @@ def _in_dir(cmd: str) -> str:
 
 
 def worker_argv(nice: int = 0) -> list:
-    return _argv(_in_dir(f"DLM_REMOTE_WORKER=1 PYTHONUNBUFFERED=1 exec {shlex.quote(py())} ytdl_worker.py {int(nice)}"))
+    return _argv(_in_dir(f"DLM_REMOTE_WORKER=1 PYTHONUNBUFFERED=1 exec {shlex.quote(py())} ytdl_worker.py {int(nice)}"),
+                 mux=False)                                          # işçi öz bağlantısı ilə: ortaq bağlantının sessiya limitini tutmur
 
 
 async def run(cmd: str, timeout: float = 30, stdin_data: bytes = None, in_dir: bool = True) -> tuple[int, bytes, str]:
@@ -294,20 +319,21 @@ async def run(cmd: str, timeout: float = 30, stdin_data: bytes = None, in_dir: b
     if not configured():
         raise RemoteUnavailable("Server ünvanı təyin edilməyib")
     argv = _argv(_in_dir(cmd) if in_dir else cmd)
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *argv, stdin=asyncio.subprocess.PIPE if stdin_data is not None else asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    except OSError as e:
-        raise RemoteUnavailable(f"ssh başlamadı: {e}")
-    try:
-        out, err = await asyncio.wait_for(proc.communicate(stdin_data), timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        raise RemoteUnavailable(f"server cavab vermədi ({timeout:.0f} san.)")
-    except asyncio.CancelledError:
-        proc.kill()
-        raise
+    async with _sem("short", SHORT_SESSIONS):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv, stdin=asyncio.subprocess.PIPE if stdin_data is not None else asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        except OSError as e:
+            raise RemoteUnavailable(f"ssh başlamadı: {e}")
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(stdin_data), timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            raise RemoteUnavailable(f"server cavab vermədi ({timeout:.0f} san.)")
+        except asyncio.CancelledError:
+            proc.kill()
+            raise
     err_s = err.decode("utf-8", "replace").strip()
     if proc.returncode == 255 and not _local_transport():
         raise RemoteUnavailable(f"ssh qoşulmadı: {err_s[-200:] or 'naməlum'}")
@@ -336,6 +362,11 @@ async def pull_file(rel: str, local: str, expect: int = -1, timeout: float = 120
     if not configured():
         raise RemoteUnavailable("Server ünvanı təyin edilməyib")
     os.makedirs(os.path.dirname(os.path.abspath(local)) or ".", exist_ok=True)
+    async with _sem("pull", PULL_SESSIONS):
+        await _pull(rel, local, expect, timeout)
+
+
+async def _pull(rel: str, local: str, expect: int, timeout: float):
     part = local + ".rpart"
     proc = await asyncio.create_subprocess_exec(
         *_argv(_in_dir(f"cat -- {shlex.quote(rel)}")), stdin=asyncio.subprocess.DEVNULL,
@@ -620,7 +651,7 @@ async def _mirror_progress(rel_prog: str, local_prog: str):
     """Serverdəki irəliləyiş faylını evdəki .prog-a köçürür → cpu_pool-un mövcud poller-i göstərir."""
     last = None
     while True:
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(3.0)                              # çoxlu yükləmə: hər biri ortaq bağlantıya sorğu göndərir
         try:
             rc, out, _ = await run(f"cat {shlex.quote(rel_prog)} 2>/dev/null", 10)
         except RemoteUnavailable:

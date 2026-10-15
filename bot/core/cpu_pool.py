@@ -790,10 +790,26 @@ class ProcPool:
 
 
 class RemoteProcPool(ProcPool):
-    """🌐 Eyni protokol, amma işçi uzaq serverdə (ssh) işləyir — bot/core/remote.py. Avto-miqyasa tabe deyil."""
+    """🌐 Eyni protokol, amma işçi uzaq serverdə (ssh) işləyir — bot/core/remote.py. Avto-miqyasa tabe deyil.
+    Hər işçi öz SSH bağlantısı ilə açılır; eyni anda yalnız bir neçəsi (sshd MaxStartups) və uğursuz olsa 3 cəhd."""
+
+    SPAWN_TRIES = 3
+    SPAWN_BACKOFF = 1.5                   # cəhdlər arası gözləmə (san.) × cəhd nömrəsi
 
     async def _spawn(self) -> _Worker:
         from bot.core import remote
+        last = None
+        for attempt in range(self.SPAWN_TRIES):
+            if attempt:
+                await asyncio.sleep(self.SPAWN_BACKOFF * attempt)
+            try:
+                async with remote.spawn_slot():
+                    return await self._spawn_once(remote)
+            except WorkerCrashed as e:
+                last = e
+        raise last
+
+    async def _spawn_once(self, remote) -> _Worker:
         try:
             await remote.ensure_synced()
             proc = await asyncio.create_subprocess_exec(

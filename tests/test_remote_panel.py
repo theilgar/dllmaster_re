@@ -182,7 +182,11 @@ def test_conn_page_shows_setup_steps_until_first_success():
     assert "deno və ya node" in V.remote_conn_view()[0]
     remote.last_check.update(ok=False, error="ssh qoşulmadı")
     text, _ = V.remote_conn_view()
-    assert "❌ ssh qoşulmadı" in text and "Qurmaq üçün" in text
+    assert "❌ ssh qoşulmadı" in text and "Əvvəlki uğurlu yoxlamadan: RAM 1.9 GB" in text
+    assert "Qurmaq üçün" not in text                                  # server əvvəl qurulub, indi yalnız qoşulmur
+    remote.last_check.update(info={})                                 # heç vaxt uğurla yoxlanmayıb
+    text, _ = V.remote_conn_view()
+    assert "❌ ssh qoşulmadı" in text and "Qurmaq üçün" in text and "Əvvəlki" not in text
 
 
 def test_accounts_page_distinguishes_same_names():

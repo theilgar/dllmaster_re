@@ -202,6 +202,7 @@ async def srv(tmp_path, monkeypatch):
     monkeypatch.setenv("DLM_REMOTE_TRANSPORT", "local")
     monkeypatch.setenv("DLM_REMOTE_DIR", str(tmp_path / "srv"))
     monkeypatch.setattr(remote, "PROBE_EVERY", 0.2)
+    monkeypatch.setattr(cp.RemoteProcPool, "SPAWN_BACKOFF", 0)          # sınıq serverdə təkrar cəhd gözləməsi testi yubatmasın
     monkeypatch.setattr(remote, "_notify_outage", AsyncMock(return_value=None))
     monkeypatch.setattr(remote, "_synced", {"hash": None})
     monkeypatch.setattr(remote, "_sync_lock", None)
@@ -433,3 +434,114 @@ async def test_parallel_worker_sync_does_not_race(srv):
                               return_exceptions=True)
     assert not [r for r in rs if isinstance(r, Exception)]
     assert not [f for f in os.listdir(srv.srv_dir / "cookies") if f.endswith(".part")]
+
+
+async def test_master_switch_off_means_home_and_on_brings_the_rules_back(srv):
+    remote.set_enabled(False)
+    res = await cp.ytdl_download(srv.url, srv.out("off"))
+    assert sha(read(res)) == sha(PAYLOAD)
+    assert cp.REMOTE_LANES["user"].stats["done"] == 0 and not cp.REMOTE_LANES["user"].workers      # serverə toxunulmadı
+    assert not remote.server_selected("download") and not remote.server_selected("upload")
+    remote.set_enabled(True)                                          # açılan kimi qaydalar işə düşür: restart lazım deyil
+    res = await cp.ytdl_download(srv.url, srv.out("on"))
+    assert sha(read(res)) == sha(PAYLOAD) and cp.REMOTE_LANES["user"].stats["done"] == 1
+    remote.set_mode("download", "home")                               # rejim «ev» — açar açıq olsa da ev
+    await cp.ytdl_download(srv.url, srv.out("home"))
+    assert cp.REMOTE_LANES["user"].stats["done"] == 1
+    remote.set_mode("download", "server")
+    remote.set_enabled(False)
+    tok = UPLOAD_CTX.set((object(), 0))                               # depo: açar söndürülübsə fayl serverdə qalmır
+    try:
+        res = await cp.ytdl_download(srv.url, srv.out("depo-off"))
+    finally:
+        UPLOAD_CTX.reset(tok)
+    assert not remote.pending(res["path"]) and sha(read(res)) == sha(PAYLOAD)
+
+
+async def test_turning_the_master_switch_off_releases_jobs_waiting_for_the_server(srv):
+    break_server()
+    t = asyncio.ensure_future(cp.ytdl_download(srv.url, srv.out("w2")))
+    await until(lambda: remote.waiting_count() == 1)
+    remote.set_enabled(False)                                         # 15 dəq. gözləmə əvəzinə dərhal evdə
+    res = await asyncio.wait_for(t, 20)
+    assert sha(read(res)) == sha(PAYLOAD) and remote.waiting_count() == 0
+
+
+async def test_file_left_on_the_server_still_comes_home_after_the_master_switch_is_turned_off(srv):
+    tok = UPLOAD_CTX.set((object(), 0))
+    try:
+        res = await cp.ytdl_download(srv.url, srv.out("left"))
+    finally:
+        UPLOAD_CTX.reset(tok)
+    assert remote.pending(res["path"])
+    remote.set_enabled(False)
+    assert await remote.try_upload(res["path"], "1:x", 1, None, "a.m4a", "t", "p", 1, "c") is None      # serverdən göndərilmir
+    assert await remote.materialize(res["path"]) and sha(read(res)) == sha(PAYLOAD)                  # fayl evə çəkilir, itmir
+
+
+# ───────────────────────── SSH sessiya limiti (sshd MaxSessions=10) ─────────────────────────
+def test_short_commands_share_one_connection_but_workers_get_their_own(monkeypatch):
+    monkeypatch.delenv("DLM_REMOTE_TRANSPORT", raising=False)
+    remote._S.put("host", "admin@203.0.113.5")
+    short = remote._argv("echo ok")
+    assert "ControlMaster=auto" in short and any(a.startswith("ControlPath=/") for a in short)
+    worker = remote.worker_argv(0)
+    assert "ControlMaster=no" in worker and "ControlPath=none" in worker and "ControlMaster=auto" not in worker
+    assert worker[-2] == "admin@203.0.113.5" and worker[-3] == "--"             # host seçim kimi oxunmur
+    assert remote.SHORT_SESSIONS + remote.PULL_SESSIONS < 10                    # ortaq bağlantı sshd limitindən aşağı
+
+
+async def test_concurrent_ssh_sessions_never_exceed_the_limit(monkeypatch):
+    live = {"now": 0, "max": 0}
+
+    class FakeProc:
+        returncode = 0
+
+        async def communicate(self, data=None):
+            live["now"] += 1
+            live["max"] = max(live["max"], live["now"])
+            await asyncio.sleep(0.02)
+            live["now"] -= 1
+            return b"ok", b""
+
+    async def fake_exec(*a, **k):
+        return FakeProc()
+
+    monkeypatch.setattr(remote.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setenv("DLM_REMOTE_TRANSPORT", "local")
+    rs = await asyncio.gather(*[remote.run("echo ok", 5) for _ in range(40)])
+    assert all(r[0] == 0 for r in rs)
+    assert 1 < live["max"] <= remote.SHORT_SESSIONS                              # 40 sorğu — eyni anda ən çox 4
+
+
+async def test_worker_connections_open_in_small_groups_and_retry_on_failure(monkeypatch):
+    monkeypatch.setattr(cp.RemoteProcPool, "SPAWN_BACKOFF", 0)
+    live = {"now": 0, "max": 0}
+    tries = {"n": 0}
+
+    class Pool(cp.RemoteProcPool):
+        async def _spawn_once(self, remote_mod):
+            live["now"] += 1
+            live["max"] = max(live["max"], live["now"])
+            try:
+                await asyncio.sleep(0.02)
+                tries["n"] += 1
+                if tries["n"] <= 2:                                              # ilk iki cəhd: kex_exchange_identification
+                    raise cp.WorkerCrashed("kex_exchange_identification: Connection closed by remote host")
+                return "worker"
+            finally:
+                live["now"] -= 1
+
+    pool = Pool("t", "t", 4)
+    assert await pool._spawn() == "worker" and tries["n"] == 3                  # 3-cü cəhd uğurlu
+    tries["n"] = 0
+    rs = await asyncio.gather(*[Pool("t", "t", 4)._spawn() for _ in range(12)], return_exceptions=True)
+    assert live["max"] <= remote.SPAWN_PARALLEL
+    assert all(r == "worker" or isinstance(r, cp.WorkerCrashed) for r in rs)
+
+    class Dead(cp.RemoteProcPool):
+        async def _spawn_once(self, remote_mod):
+            raise cp.WorkerCrashed("ssh qoşulmadı")
+
+    with pytest.raises(cp.WorkerCrashed, match="ssh qoşulmadı"):                 # 3 cəhddən sonra xəta yuxarı qalxır
+        await Dead("d", "d", 1)._spawn()

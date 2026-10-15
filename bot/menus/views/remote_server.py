@@ -188,10 +188,10 @@ def remote_conn_view(note: str = "") -> tuple[str, InlineKeyboardMarkup]:
         lines += ["", f"Son yoxlama {_clock(chk['at'])}: " + ("✅ <b>uğurlu</b>" if chk["ok"] else f"❌ {escape(chk['error'][:120])}")]
         bits = _info_bits(s["info"])
         if bits:
-            lines.append(" · ".join(bits))
+            lines.append(("Əvvəlki uğurlu yoxlamadan: " if not chk["ok"] else "") + " · ".join(bits))
         if s["info"] and not s["info"].get("js"):
             lines.append("⚠️ <i>YouTube üçün serverdə deno və ya node lazımdır: sudo apt install nodejs</i>")
-    if not (chk["at"] and chk["ok"]):
+    if not s["info"]:                                   # server heç vaxt uğurla yoxlanmayıb — qurma addımları
         lines += ["", "<b>Qurmaq üçün</b>",
                   "1. ✏️ Ünvanı yazın: <code>istifadəçi@ip</code>",
                   "2. 🔑 SSH açarının yolunu yazın: parolsuz giriş üçün <code>ssh-copy-id</code> edin",
