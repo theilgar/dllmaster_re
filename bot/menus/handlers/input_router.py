@@ -34,6 +34,7 @@ from bot.menus.state import (
     rec_inp,
     stp,
     tx,
+    upd_inp,
     us,
     wm,
 )
@@ -708,6 +709,60 @@ async def group_id_text_input(message: Message):
     await message.answer(text, parse_mode="HTML", reply_markup=kb)
 
 
+async def waiting_sudo_pwd(message: Message) -> bool:
+    return upd_inp.get("stage") == "await_sudo" and is_creator(message.from_user.id)
+
+
+async def sudo_pwd_input(message: Message):
+    ctx = get_context()
+    pwd = (message.text or "").strip()
+    try:
+        await message.delete()
+    except Exception as _e:
+        logger.debug("sudo_pwd_input delete message xətası: %r", _e)
+
+    if not pwd or upd_inp.get("stage") != "await_sudo":
+        upd_inp["stage"] = None
+        return
+
+    upd_inp["stage"] = None
+    chat_id = upd_inp.get("chat_id")
+    panel_id = upd_inp.get("panel_id")
+    back = upd_inp.get("back") or "main"
+    panel_args = dict(chat_id=chat_id, message_id=panel_id, parse_mode="HTML")
+
+    with contextlib.suppress(Exception):
+        await ctx.bot.edit_message_text(
+            text="🔔 <b>Yeniləmələr</b>\n\n⏳ <i>Sudo şifrəsi ilə sistem paketləri yenilənir... (bir neçə dəqiqə çəkə bilər)</i>",
+            **panel_args,
+        )
+
+    from bot.menus.views.dev import run_updates
+    lines2, restart = await run_updates(sudo_password=pwd)
+    del pwd
+
+    with contextlib.suppress(Exception):
+        from common import updates as upd
+        if upd:
+            await upd.check_updates()
+
+    rows = []
+    if any("sudo parol istədi" in ln for ln in lines2):
+        from common.menu import _btn
+        rows.append([_btn("🔑 Yenidən cəhd et", f"upd_pwd:{back}")])
+    rb = getattr(ctx, "restart_button", None)
+    if restart and rb:
+        rows.append([rb("♻️ Botu restart et")])
+    rows.append(nav_row(back))
+
+    with contextlib.suppress(Exception):
+        await ctx.bot.edit_message_text(
+            text="🔔 <b>Yeniləmə nəticəsi</b>\n" + LINE + "\n" + "\n".join(lines2),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+            **panel_args,
+        )
+
+
 def register_input_handlers(router: Router):
     router.message.register(
         premium_user_input,
@@ -790,4 +845,10 @@ def register_input_handlers(router: Router):
         F.text,
         ~F.text.startswith("/"),
         waiting_grp_input,
+    )
+    router.message.register(
+        sudo_pwd_input,
+        F.chat.type == "private",
+        F.text,
+        waiting_sudo_pwd,
     )

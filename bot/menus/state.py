@@ -50,6 +50,7 @@ perf_inp: dict[str, Any] = {"stage": None, "key": None, "chat_id": None, "panel_
 rec_inp: dict[str, Any] = {"stage": None, "chat_id": None, "panel_id": None}
 REC_INP = rec_inp  # Geriyə uyğunluq üçün alias
 yta_inp: dict[str, Any] = {"stage": None, "acc": None, "chat_id": None, "panel_id": None}
+upd_inp: dict[str, Any] = {"stage": None, "chat_id": None, "panel_id": None, "back": "main"}
 grp_inp: dict[int, Any] = {}
 
 # Mətn gözləmələri zənciri: (vəziyyət lüğəti, icazə verilən mərhələlər)
@@ -69,6 +70,7 @@ TEXT_WAITS: tuple[tuple[dict[str, Any], set[str] | None], ...] = (
     (perf_inp, None),
     (rec_inp, None),
     (yta_inp, {"await_name"}),
+    (upd_inp, {"await_sudo"}),
 )
 
 
@@ -168,6 +170,7 @@ __all__ = [
     "stp",
     "tp",
     "tx",
+    "upd_inp",
     "us",
     "wm",
     "yt_inp",

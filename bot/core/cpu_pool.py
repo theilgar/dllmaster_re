@@ -796,6 +796,10 @@ class RemoteProcPool(ProcPool):
     SPAWN_TRIES = 3
     SPAWN_BACKOFF = 1.5                   # cəhdlər arası gözləmə (san.) × cəhd nömrəsi
 
+    def __init__(self, name: str, label: str, size: int, server):
+        super().__init__(name, label, size)
+        self.server = server
+
     async def _spawn(self) -> _Worker:
         from bot.core import remote
         last = None
@@ -803,7 +807,7 @@ class RemoteProcPool(ProcPool):
             if attempt:
                 await asyncio.sleep(self.SPAWN_BACKOFF * attempt)
             try:
-                async with remote.spawn_slot():
+                async with self.server.spawn_slot():
                     return await self._spawn_once(remote)
             except WorkerCrashed as e:
                 last = e
@@ -811,9 +815,10 @@ class RemoteProcPool(ProcPool):
 
     async def _spawn_once(self, remote) -> _Worker:
         try:
-            await remote.ensure_synced()
+            await self.server.ensure_synced()
+            await self.server.ensure_provider()                  # PO token provayderi dayanıbsa qaldırılır
             proc = await asyncio.create_subprocess_exec(
-                *remote.worker_argv(nice()), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                *self.server.worker_argv(nice()), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                 stderr=None, limit=64 * 1024 * 1024)
         except (remote.RemoteUnavailable, OSError) as e:
             raise WorkerCrashed(f"uzaq server: {e}")
@@ -837,15 +842,11 @@ LANES = {
     "user": ProcPool("user", "👤 İstifadəçi", user_procs()),
     "depo": ProcPool("depo", "📦 Depo", depo_procs()),
 }
-REMOTE_LANES = {                                                  # yt-dlp serverdə — zolaqlar ayrı (slot sayı: remote.depo_slots() və user_slots())
-    "user": RemoteProcPool("remote_user", "🌐 Uzaq 👤 istifadəçi", 2),
-    "depo": RemoteProcPool("remote_depo", "🌐 Uzaq 📦 depo", 2),
-}
-REMOTE_UP = RemoteProcPool("remote_up", "🌐 Uzaq upload", 2)    # serverdən Telegram-a upload
 
 
 async def shutdown_pools():
-    for p in (*LANES.values(), *REMOTE_LANES.values(), REMOTE_UP):
+    from bot.core import remote
+    for p in (*LANES.values(), *remote.all_pools()):
         await p.shutdown()
 
 

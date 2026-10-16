@@ -545,3 +545,110 @@ async def test_worker_connections_open_in_small_groups_and_retry_on_failure(monk
 
     with pytest.raises(cp.WorkerCrashed, match="ssh qoşulmadı"):                 # 3 cəhddən sonra xəta yuxarı qalxır
         await Dead("d", "d", 1)._spawn()
+
+
+# ───────────────────────── serverin IP-si YouTube tərəfindən rədd edilir ─────────────────────────
+def test_datacenter_ip_rejection_is_recognised_and_errors_are_tagged_with_their_origin():
+    for msg in ("ERROR: [youtube] abc: Failed to extract any player response; please report this issue",
+                "ERROR: Sign in to confirm you're not a bot", "HTTP Error 403: Forbidden", "HTTP Error 429: Too Many Requests"):
+        assert remote._is_ip_rejection(msg), msg
+    for msg in ("ERROR: [youtube] abc: Video unavailable", "Requested format is not available", "No module named 'yt_dlp'"):
+        assert not remote._is_ip_rejection(msg), msg
+    e = RuntimeError("x")
+    assert remote.via_tag(e) == ""
+    e.via = "server"
+    assert remote.via_tag(e) == " · 🌐 server"
+
+
+async def test_consecutive_ip_rejections_notify_the_owner_once_and_a_success_resets_the_streak(srv, monkeypatch):
+    monkeypatch.setattr(remote, "IP_BLOCK_AFTER", 3)
+    remote._ip_block.update(streak=0, notified_at=0.0)
+    notify = AsyncMock(return_value=None)
+    monkeypatch.setattr(remote, "_notify_ip_block", notify)
+    for i in range(2):
+        with pytest.raises(Exception, match="403"):
+            await cp.ytdl_download(srv.deny, srv.out(f"ip{i}"))
+    assert remote._ip_block["streak"] == 2 and not remote.ip_blocked() and not notify.await_count
+    await cp.ytdl_download(srv.url, srv.out("ok"))                         # server bu dəfə yüklədi → zəncir kəsilir
+    assert remote._ip_block["streak"] == 0
+    for i in range(4):
+        with pytest.raises(Exception, match="403"):
+            await cp.ytdl_download(srv.deny, srv.out(f"ip2{i}"))
+    await asyncio.sleep(0.1)
+    assert remote.ip_blocked() and notify.await_count == 1                 # 3-cü rəddə çatanda bir dəfə, sonrakılarda təkrar yox
+    assert remote.stats["ip_retry"] == 6
+    await remote.apply_fix("auto")                                          # qərar verildi → xəbərdarlıq götürülür
+    assert not remote.ip_blocked()
+
+
+async def test_ip_block_notification_has_home_and_auto_buttons(monkeypatch):
+    sent = []
+
+    async def fake_send(text, rows):
+        sent.append((text, rows))
+
+    monkeypatch.setattr(remote, "_send_to_creator", fake_send)
+    remote._ip_block.update(streak=6)
+    await remote._notify_ip_block()
+    text, rows = sent[0]
+    assert "IP-si YouTube tərəfindən rədd edilir" in text and "cookies" in text.lower() and "<b>6</b>" in text
+    assert rows == [[("🏠 Evə keç", "menu:rmt:fix:home"), ("🤖 Avto", "menu:rmt:fix:auto")]]
+
+
+# ───────────────────────── serverin öz Firefox-u, Deno, PO token ─────────────────────────
+async def test_server_firefox_replaces_home_cookies_but_cookieless_attempts_stay_cookieless(tmp_path, monkeypatch):
+    pushed = []
+    monkeypatch.setattr(remote, "push_bytes", AsyncMock(side_effect=lambda data, rel, *a: pushed.append(rel)))
+    jar = tmp_path / "c.txt"
+    jar.write_text("# Netscape\n")
+    base = {"format": "bestaudio[ext=m4a]/bestaudio/best", "outtmpl": str(tmp_path / "d" / "x.%(ext)s"),
+            "js_runtimes": {"node": {"path": "/usr/bin/node"}, "deno": {"path": "/x/deno"}}}
+    remote.set_server_firefox(True)
+    o, _ = await remote.prepare_opts({**base, "cookiefile": str(jar)})
+    assert o["cookiesfrombrowser"] == ("firefox",) and "cookiefile" not in o and not pushed       # evdən heç nə getmir
+    o, _ = await remote.prepare_opts({**base, "cookiesfrombrowser": ("chrome", "/home/profil", "BASICTEXT")})
+    assert o["cookiesfrombrowser"] == ("firefox",)                                              # ev brauzeri deyil, serverinki
+    o, _ = await remote.prepare_opts(dict(base))                                                  # «cookies-siz» cəhd
+    assert "cookiesfrombrowser" not in o and "cookiefile" not in o
+    assert o["js_runtimes"] == {"deno": {}}                                                       # Node 20 dəstəklənmir → Deno
+    assert o["_dlm_audio_extract"] is True
+    o, _ = await remote.prepare_opts({**base, "format": "best"})
+    assert "_dlm_audio_extract" not in o                                                          # yalnız səs formatı üçün
+    remote.set_server_firefox(False)
+    o, _ = await remote.prepare_opts({**base, "cookiefile": str(jar)})
+    assert o["cookiefile"].startswith("cookies/") and "cookiesfrombrowser" not in o and pushed     # köhnə yol: fayl göndərilir
+
+
+def test_workers_get_the_servers_own_deno_on_their_path(monkeypatch):
+    monkeypatch.delenv("DLM_REMOTE_TRANSPORT", raising=False)
+    remote._S.put("host", "admin@203.0.113.5")
+    cmd = remote.worker_argv(0)[-1]
+    assert 'PATH="$PWD/bin:$PATH"' in cmd and "ytdl_worker.py" in cmd and "DLM_REMOTE_WORKER=1" in cmd
+
+
+async def test_provider_is_restarted_at_most_once_a_minute(monkeypatch):
+    calls = []
+
+    async def fake_run(cmd, timeout=30, *a, **k):
+        calls.append(cmd)
+        return 0, b"", ""
+
+    monkeypatch.setattr(remote, "run", fake_run)
+    monkeypatch.delenv("DLM_REMOTE_TRANSPORT", raising=False)
+    remote._provider["checked"] = 0.0
+    await asyncio.gather(*[remote.ensure_provider() for _ in range(16)])           # 16 işçi birlikdə açılır
+    assert len(calls) == 1 and "4416/ping" in calls[0] and "build/main.js" in calls[0] and "127.0.0.1" in calls[0]
+    await remote.ensure_provider()
+    assert len(calls) == 1
+    await remote.ensure_provider(force=True)
+    assert len(calls) == 2
+    monkeypatch.setenv("DLM_REMOTE_TRANSPORT", "local")                             # sınaq nəqliyyatında toxunmur
+    await remote.ensure_provider(force=True)
+    assert len(calls) == 2
+
+
+def test_setup_installs_the_pieces_youtube_needs_next_to_the_worker():
+    assert "bgutil-ytdlp-pot-provider" in remote.PROVIDER_INSTALL and "--branch \"$V\"" in remote.PROVIDER_INSTALL
+    assert "bin/deno" in remote.DENO_INSTALL and "denoland/deno/releases" in remote.DENO_INSTALL
+    assert "sudo" not in remote.DENO_INSTALL + remote.PROVIDER_INSTALL + remote.PROVIDER_CMD      # yalnız istifadəçi qovluğunda
+    assert "--host 127.0.0.1" in remote.PROVIDER_CMD                                                # kənardan açıq deyil

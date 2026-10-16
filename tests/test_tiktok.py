@@ -57,3 +57,66 @@ def test_photo_post_variants_and_regex_fallback():
             '"playUrl":"https:\\u002F\\u002Fcdn.x\\u002Fa.mp3","original":false} ...</html>')
     m = tt.parse_page_music(html)           # JSON bloku yoxdur — regex ehtiyatı
     assert m and m["title"] == "Sevgi" and m["author"] == "Rəsul" and m["play_url"] == "https://cdn.x/a.mp3"
+
+
+def test_tiktok_group_link_modes(monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+    from aiogram import Dispatcher
+    import bot.core.group_panel as gp
+
+    dp = Dispatcher()
+    ctx = MagicMock()
+    ctx.dp = dp
+    ctx.creator_id = 999
+    ctx.test_mp3_hook = None
+    tt.setup(ctx)
+
+    # Find the tt_group handler from dp
+    tt_group_handler = None
+    tt_confirm_cb = None
+    for h in dp.message.handlers:
+        if getattr(h.callback, "__name__", "") == "tt_group":
+            tt_group_handler = h.callback
+    for h in dp.callback_query.handlers:
+        if getattr(h.callback, "__name__", "") == "group_tt_confirm_callback":
+            tt_confirm_cb = h.callback
+
+    assert tt_group_handler is not None
+    assert tt_confirm_cb is not None
+
+    msg = MagicMock()
+    msg.text = "bax https://vm.tiktok.com/ZMabc123/"
+    msg.caption = None
+    msg.chat.id = -10012345
+    msg.chat.type = "supergroup"
+    msg.from_user.id = 42
+    msg.from_user.mention_html.return_value = "User42"
+    msg.reply = AsyncMock()
+
+    # 1. Mode: "off" -> Should do nothing
+    monkeypatch.setattr(gp, "get_group_link_mode", lambda cid: "off")
+    asyncio.run(tt_group_handler(msg))
+    msg.reply.assert_not_called()
+
+    # 2. Mode: "confirm" -> Should send confirmation message with buttons
+    monkeypatch.setattr(gp, "get_group_link_mode", lambda cid: "confirm")
+    asyncio.run(tt_group_handler(msg))
+    assert msg.reply.called
+    args, kwargs = msg.reply.call_args
+    assert "Shazam" in args[0] or "TikTok" in args[0]
+    kb = kwargs.get("reply_markup")
+    assert kb is not None
+    assert any("tt_lk:dl:" in b.callback_data for row in kb.inline_keyboard for b in row)
+
+    # 3. Callback "no" -> Cancels and deletes message
+    cb_no = MagicMock()
+    # Find token from inline keyboard callback data
+    token = kb.inline_keyboard[0][0].callback_data.split(":")[-1]
+    cb_no.data = f"tt_lk:no:{token}"
+    cb_no.from_user.id = 42
+    cb_no.answer = AsyncMock()
+    cb_no.message.delete = AsyncMock()
+    asyncio.run(tt_confirm_cb(cb_no))
+    assert cb_no.message.delete.called
+

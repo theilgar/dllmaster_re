@@ -351,7 +351,7 @@ def restart_argv() -> list:
     return [sys.executable, *args[1:]]
 
 
-async def run_shell(cmd: str, timeout: int = 600, env: dict = None) -> tuple[int, str]:
+async def run_shell(cmd: str, timeout: int = 600, env: dict = None, input_data: str = None) -> tuple[int, str]:
     """Asinxron shell əmrini təhlükəsiz icra edir və (returncode, stdout+stderr) qaytarır."""
     environ = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"}
     if env:
@@ -359,12 +359,13 @@ async def run_shell(cmd: str, timeout: int = 600, env: dict = None) -> tuple[int
     try:
         proc = await asyncio.create_subprocess_shell(
             cmd,
-            stdin=asyncio.subprocess.DEVNULL,
+            stdin=asyncio.subprocess.PIPE if input_data is not None else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             env=environ,
         )
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout)
+        inp_bytes = input_data.encode("utf-8") if input_data is not None else None
+        out, _ = await asyncio.wait_for(proc.communicate(input=inp_bytes), timeout)
         return proc.returncode or 0, out.decode("utf-8", "replace")
     except asyncio.TimeoutError:
         with contextlib.suppress(ProcessLookupError):      # yetim proses (git pull / pip) qalmasın

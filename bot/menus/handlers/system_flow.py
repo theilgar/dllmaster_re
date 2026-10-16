@@ -13,10 +13,11 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup
 
 from bot.menus.navigation import nav_row
 from bot.menus.views.music import mus_view
-from bot.menus.state import answer_and_edit, get_context, reset_inputs, safe_edit_cb
+from bot.menus.state import answer_and_edit, get_context, is_creator, reset_inputs, safe_edit_cb
+from bot.menus.views.base import LINE, SECTIONS, crumb
 from bot.menus.views.dev import dev_hub_view, git_summary, run_updates, upd_view
 from bot.menus.views.system_hub import accel_view, bots_view, sys_kb, sys_text
-from common.menu import LINE
+from common.menu import _btn
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +106,8 @@ async def _mcb_upd(cb: CallbackQuery, parts: list, action: str):
         with contextlib.suppress(Exception):
             await upd.check_updates()
         rows = []
+        if any("sudo parol istədi" in ln for ln in lines2):
+            rows.append([_btn("🔑 Şifrəni daxil et (sistem üçün)", f"upd_pwd:{back}")])
         rb = getattr(ctx, "restart_button", None)
         if restart and rb:
             rows.append([rb("♻️ Botu restart et")])
@@ -118,6 +121,35 @@ async def _mcb_upd(cb: CallbackQuery, parts: list, action: str):
     else:
         await cb.answer()
     await safe_edit_cb(cb, *upd_view(back, note))
+
+
+async def _mcb_upd_pwd(cb: CallbackQuery, parts: list, action: str):
+    back = parts[1] if len(parts) > 1 and parts[1] in ("main", "dev", "sys") else "main"
+    if not is_creator(cb.from_user.id):
+        await cb.answer("⛔ Bu əməliyyat yalnız bot sahibi üçündür", show_alert=True)
+        return
+    from bot.menus.state import upd_inp
+    upd_inp["stage"] = "await_sudo"
+    upd_inp["chat_id"] = cb.message.chat.id
+    upd_inp["panel_id"] = cb.message.message_id
+    upd_inp["back"] = back
+
+    crumb_path = [SECTIONS["sys"]] if back in ("sys", "dev") else []
+    text = (
+        crumb(*crumb_path, "🔑 Sudo Şifrəsi") + "\n"
+        + LINE + "\n"
+        "🔑 <b>Linux sistem paketləri üçün sudo şifrəsi</b>\n\n"
+        "<i>Paketləri (pacman/apt) yeniləmək üçün şifrənizi bu çata göndərin.</i>\n\n"
+        "🛡 <b>Təhlükəsizlik:</b>\n"
+        "• Göndərdiyiniz mesaj <b>dərhal çatdan silinəcək</b>.\n"
+        "• Şifrə loglara və ya bazaya yazılmayacaq.\n"
+        "• Yalnız bot sahibi daxil edə bilər."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [_btn("✖️ Ləğv et", f"upd:{back}")]
+    ])
+    await cb.answer()
+    await safe_edit_cb(cb, text, kb)
 
 
 async def _mcb_dq(cb: CallbackQuery, parts: list, action: str):
@@ -264,6 +296,10 @@ async def handle_system_action(cb: CallbackQuery, parts: list[str], action: str)
 
     if action == "upd":
         await _mcb_upd(cb, parts, action)
+        return True
+
+    if action == "upd_pwd":
+        await _mcb_upd_pwd(cb, parts, action)
         return True
 
     if action == "dq":

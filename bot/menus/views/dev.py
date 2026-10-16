@@ -130,7 +130,7 @@ def dev_hub_view(git_line: str = "", note: str = "") -> tuple[str, InlineKeyboar
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def run_updates() -> tuple[list, bool]:
+async def run_updates(sudo_password: str | None = None) -> tuple[list, bool]:
     from common.bootstrap import ROOT, detect_pm
 
     lines, restart = [], False
@@ -138,30 +138,43 @@ async def run_updates() -> tuple[list, bool]:
     items = _upd_items()
     kinds = {u.kind for u in items}
 
-    if "bot" in kinds or not items:
-        rc, out = await run_shell(f"git -C {q(str(ROOT))} pull --ff-only")
-        tail = (out.strip().splitlines() or ["—"])[-1][:120]
-        lines.append(f"{'✅' if rc == 0 else '❌'} 🤖 git pull · <code>{escape(tail)}</code>")
-        restart = restart or (rc == 0 and "up to date" not in out.lower())
+    run_bot_and_pip = (sudo_password is None) or ("bot" in kinds or "pip" in kinds)
 
-    if "pip" in kinds:
-        req = str(ROOT / "requirements.txt")
-        rc, out = await run_shell(f"{q(sys.executable)} -m pip install -U -r {q(req)}")
-        lines.append(f"{'✅' if rc == 0 else '❌'} 📦 pip -U -r requirements.txt")
-        if rc != 0:
-            err = [ln for ln in out.strip().splitlines() if ln.strip()]
-            key = [ln for ln in err if "error" in ln.lower()] or err
-            lines.append(f"<code>{escape(' | '.join(key[-3:])[:350])}</code>")
-        restart = restart or rc == 0
+    if run_bot_and_pip:
+        if "bot" in kinds or not items:
+            rc, out = await run_shell(f"git -C {q(str(ROOT))} pull --ff-only")
+            tail = (out.strip().splitlines() or ["—"])[-1][:120]
+            lines.append(f"{'✅' if rc == 0 else '❌'} 🤖 git pull · <code>{escape(tail)}</code>")
+            restart = restart or (rc == 0 and "up to date" not in out.lower())
 
-    if "system" in kinds:
+        if "pip" in kinds:
+            req = str(ROOT / "requirements.txt")
+            rc, out = await run_shell(f"{q(sys.executable)} -m pip install -U -r {q(req)}")
+            lines.append(f"{'✅' if rc == 0 else '❌'} 📦 pip -U -r requirements.txt")
+            if rc != 0:
+                err = [ln for ln in out.strip().splitlines() if ln.strip()]
+                key = [ln for ln in err if "error" in ln.lower()] or err
+                lines.append(f"<code>{escape(' | '.join(key[-3:])[:350])}</code>")
+            restart = restart or rc == 0
+
+    if "system" in kinds or sudo_password is not None:
         pm = detect_pm()
-        cmd = "sudo -n pacman -Syu --noconfirm" if pm == "pacman" else "sudo -n apt-get -y upgrade"
-        rc, out = await run_shell(cmd)
-        if rc != 0 and ("password is required" in out.lower() or "sudo:" in out.lower()):
-            lines.append("⚠️ 🐧 sistem paketləri — sudo parol istədi")
+        if sudo_password:
+            cmd = "sudo -S pacman -Syu --noconfirm" if pm == "pacman" else "sudo -S apt-get -y upgrade"
+            rc, out = await run_shell(cmd, input_data=sudo_password.strip() + "\n")
         else:
-            lines.append(f"{'✅' if rc == 0 else '❌'} 🐧 sistem paketləri")
+            cmd = "sudo -n pacman -Syu --noconfirm" if pm == "pacman" else "sudo -n apt-get -y upgrade"
+            rc, out = await run_shell(cmd)
+
+        out_low = out.lower()
+        if rc != 0 and ("password is required" in out_low or "sudo:" in out_low or "incorrect password" in out_low or "try again" in out_low):
+            lines.append("⚠️ 🐧 sistem paketləri — sudo parol istədi")
+        elif rc != 0:
+            err_tail = (out.strip().splitlines() or ["xəta"])[-1][:120]
+            lines.append(f"❌ 🐧 sistem paketləri · <code>{escape(err_tail)}</code>")
+        else:
+            lines.append("✅ 🐧 sistem paketləri")
+            restart = True
 
     if not lines:
         lines.append("ℹ️ Yeniləmə yoxdur")

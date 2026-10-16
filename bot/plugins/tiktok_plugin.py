@@ -315,8 +315,14 @@ def setup(context):
             logger.info(f"TikTok qısa linki açılmadı: {str(e)[:100]}")
             return url
 
-    async def handle(message: types.Message, url: str):
-        status = await message.reply(tr("🎵 <i>TikTok mahnısı axtarılır...</i>"), parse_mode="HTML")
+    async def handle(message: types.Message, url: str, status: types.Message | None = None):
+        if not url:
+            return
+        if status is None:
+            status = await message.reply(tr("🎵 <i>TikTok mahnısı axtarılır...</i>"), parse_mode="HTML")
+        else:
+            with contextlib.suppress(Exception):
+                await status.edit_text(tr("🎵 <i>TikTok mahnısı axtarılır...</i>"), parse_mode="HTML")
         url = await _resolve(url)
 
         async def say(txt: str):
@@ -419,15 +425,131 @@ def setup(context):
         with contextlib.suppress(Exception):
             await status.delete()
 
+    group_tt_confirms: dict = {}
+
     async def has_tt_private(message: types.Message) -> bool:
-        if not message.text or not find_url(message.text):
+        raw = message.text or message.caption or ""
+        if not raw or not find_url(raw):
             return False
         from bot.core.input_wait import waiting_any
         return not (message.from_user and waiting_any(context, message.from_user.id))
 
-    @dp.message(F.chat.type == "private", F.text, ~F.via_bot, has_tt_private)
+    async def has_tt_group(message: types.Message) -> bool:
+        raw = message.text or message.caption or ""
+        if not raw or not find_url(raw):
+            return False
+        if raw.strip().startswith("/"):
+            return False
+        from bot.core.input_wait import waiting_any
+        return not (message.from_user and waiting_any(context, message.from_user.id))
+
+    @dp.message(F.chat.type == "private", ~F.via_bot, has_tt_private)
     async def tt_private(message: types.Message):
-        await handle(message, find_url(message.text))
+        raw = message.text or message.caption or ""
+        await handle(message, find_url(raw))
+
+    @dp.message(F.chat.type.in_({"group", "supergroup"}), ~F.via_bot, has_tt_group)
+    async def tt_group(message: types.Message):
+        raw = message.text or message.caption or ""
+        url = find_url(raw)
+        if not url or not message.from_user:
+            return
+
+        from bot.core.group_panel import get_group_link_mode, LINK_MODE_CONFIRM, LINK_MODE_OFF
+        mp3_hook = getattr(context, "test_mp3_hook", None)
+        if mp3_hook and hasattr(mp3_hook, "get_group_link_mode") and callable(mp3_hook.get_group_link_mode):
+            res = mp3_hook.get_group_link_mode(message.chat.id)
+            lmode = res if isinstance(res, str) else get_group_link_mode(message.chat.id)
+        else:
+            lmode = get_group_link_mode(message.chat.id)
+
+        if lmode == LINK_MODE_OFF:
+            return
+
+        if lmode == LINK_MODE_CONFIRM:
+            from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+            token = uuid.uuid4().hex[:10]
+            group_tt_confirms[token] = {
+                "message": message,
+                "url": url,
+                "chat_id": message.chat.id,
+                "uid": message.from_user.id,
+                "ts": time.time(),
+            }
+            now = time.time()
+            for k in list(group_tt_confirms.keys()):
+                if now - group_tt_confirms[k].get("ts", 0) > 3600:
+                    group_tt_confirms.pop(k, None)
+
+            confirm_text = (
+                f"🎵 <b>TikTok Videosu</b>\n\n"
+                f"<i>Bu videodakı musiqini Shazam ilə axtarıb yükləmək istəyirsiniz?</i>\n\n"
+                f"👤 Göndərən: {message.from_user.mention_html()}"
+            )
+            confirm_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text=tr("📥 Yüklə"), callback_data=f"tt_lk:dl:{token}"),
+                    InlineKeyboardButton(text=tr("✖️ Ləğv et"), callback_data=f"tt_lk:no:{token}")
+                ]
+            ])
+            await message.reply(confirm_text, parse_mode="HTML", reply_markup=confirm_kb, disable_web_page_preview=True)
+            return
+
+        # lmode == "auto"
+        await handle(message, url)
+
+    @dp.callback_query(F.data.startswith("tt_lk:"))
+    async def group_tt_confirm_callback(cb: types.CallbackQuery):
+        now = time.time()
+        for k in list(group_tt_confirms.keys()):
+            if now - group_tt_confirms[k].get("ts", 0) > 3600:
+                group_tt_confirms.pop(k, None)
+
+        parts = cb.data.split(":")
+        if len(parts) < 3:
+            await cb.answer()
+            return
+
+        act = parts[1]
+        token = parts[2]
+        item = group_tt_confirms.get(token)
+        if not item:
+            await cb.answer(tr("Bu sorğunun vaxtı bitib və ya artıq cavablandırılıb."), show_alert=True)
+            with contextlib.suppress(Exception):
+                await cb.message.delete()
+            return
+
+        chat_id = item["chat_id"]
+        sender_uid = item["uid"]
+        clicker_uid = cb.from_user.id
+        creator_id = getattr(context, "creator_id", 0)
+
+        is_sender = (clicker_uid == sender_uid)
+        is_creator_user = (clicker_uid == creator_id)
+        is_admin = False
+        if not (is_sender or is_creator_user):
+            try:
+                m = await cb.bot.get_chat_member(chat_id, clicker_uid)
+                status_val = str(getattr(m.status, "value", m.status)).lower()
+                is_admin = status_val in ("administrator", "creator")
+            except Exception:
+                is_admin = False
+
+        if not (is_sender or is_admin or is_creator_user):
+            await cb.answer(tr("👮 Bu sorğunu yalnız linki göndərən və ya qrup adminləri təsdiqləyə bilər!"), show_alert=True)
+            return
+
+        if act == "no":
+            group_tt_confirms.pop(token, None)
+            await cb.answer(tr("❌ Yükləmə ləğv edildi"))
+            with contextlib.suppress(Exception):
+                await cb.message.delete()
+            return
+
+        if act == "dl":
+            group_tt_confirms.pop(token, None)
+            await cb.answer(tr("⏳ Yükləmə başladılır..."))
+            await handle(item["message"], item["url"], status=cb.message)
 
     @dp.message(Command("tt", "tiktok"))
     async def tt_cmd(message: types.Message, command: CommandObject):

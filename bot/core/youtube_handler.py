@@ -10,6 +10,7 @@ from yt_dlp.utils import DownloadCancelled   # plugin-lər "dayandırıldı" hal
 from common.utilities import format_duration
 from bot.core import webprofile
 from bot.core import yt_accounts   # 🔑 bir neçə YouTube hesabı — rollar və blokda avtomatik keçid
+from bot.core import remote  # 🌐 uzaq server: xətanın harada baş verdiyini loqda göstərmək üçün
 from bot.core import cpu_pool  # ⚙️ yt-dlp ayrıca proseslərdə — bot donmur, bütün nüvələr işləyir
 
 logger = logging.getLogger(__name__)
@@ -788,7 +789,7 @@ async def download_as_m4a(url: str, base_name: str, browser: str, cancel_event=N
                 remove_partial(base_name)
                 break
             attempt_failed(label, e)
-            logger.info(f"Cəhd uğursuz ({label}): {str(e)[:200]}")       # növbəti üsul sınanır — WARNING deyil
+            logger.info(f"Cəhd uğursuz ({label}){remote.via_tag(e)}: {str(e)[:200]}")       # növbəti üsul sınanır — WARNING deyil
             remove_partial(base_name)
             if use_cookies and acc and _is_account_block(e):
                 yt_accounts.report(acc["id"], False)

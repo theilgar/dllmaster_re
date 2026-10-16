@@ -117,6 +117,8 @@ def ytdl_download(url: str, opts: dict, cancel_path: str = None):
                 except OSError:
                     pass
 
+    opts = dict(opts)
+    audio_only = opts.pop("_dlm_audio_extract", False)       # 🌐 server: video faylından səsi itkisiz çıxar (az trafik)
     opts = _quiet(opts)
     opts["progress_hooks"] = [hook]
     with YoutubeDL(opts) as ydl:
@@ -126,7 +128,32 @@ def ytdl_download(url: str, opts: dict, cancel_path: str = None):
         if opts.get("max_filesize") and not os.path.exists(path):
             # yt-dlp max_filesize aşılanda xəta atmır, sadəcə yükləmir ("File is larger than max-filesize")
             raise RuntimeError(f"{FILE_TOO_LARGE} ({int(opts['max_filesize']) // 1048576} MB)")
+        if audio_only:
+            path = extract_aac(path, (downloads[0] if downloads else info).get("acodec"),
+                               (downloads[0] if downloads else info).get("vcodec"))
         return {"path": path, "info": _slim(ydl.sanitize_info(info))}
+
+
+def extract_aac(path: str, acodec, vcodec) -> str:
+    """Video konteynerindəki (mp4) AAC səsi YENİDƏN KODLAMADAN .m4a-ya çıxarır → fayl ~4 dəfə kiçik, ev ffmpeg işlətmir.
+    Səs AAC deyilsə, video yoxdursa və ya ffmpeg alınmazsa — fayl olduğu kimi qalır."""
+    import shutil
+    import subprocess
+    if not path.lower().endswith((".mp4", ".mkv", ".mov")) or not str(acodec or "").startswith("mp4a") \
+            or not vcodec or vcodec == "none" or not shutil.which("ffmpeg"):
+        return path
+    out = os.path.splitext(path)[0] + ".m4a"
+    try:
+        r = subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", path, "-vn", "-c:a", "copy", out],
+                           capture_output=True, timeout=180)
+    except (OSError, subprocess.SubprocessError):
+        return path
+    if r.returncode != 0 or not os.path.exists(out) or os.path.getsize(out) == 0:
+        if os.path.exists(out):
+            os.remove(out)
+        return path
+    os.remove(path)
+    return out
 
 
 _ytm = None
@@ -202,16 +229,57 @@ def cleanup_old(max_age: int = 6 * 3600):
     return n
 
 
+def _firefox_login():
+    """Serverin Firefox profilində YouTube / Google girişi varmı? Yalnız cookie ADLARI yoxlanılır (dəyərlər oxunmur).
+    Firefox işləyərkən yeni yazılar -wal faylındadır — üç fayl birlikdə kopyalanır. → profil adı və ya None."""
+    import glob
+    import shutil
+    import sqlite3
+    import tempfile
+    want = ("SID", "__Secure-1PSID", "__Secure-3PSID", "LOGIN_INFO")
+    for db in glob.glob(os.path.expanduser("~/.mozilla/firefox/*/cookies.sqlite")):
+        tmp = tempfile.mkdtemp()
+        try:
+            for suffix in ("", "-wal", "-shm"):
+                if os.path.exists(db + suffix):
+                    shutil.copy(db + suffix, os.path.join(tmp, "cookies.sqlite" + suffix))
+            con = sqlite3.connect(os.path.join(tmp, "cookies.sqlite"))
+            found = {r[0] for r in con.execute(
+                "select name from moz_cookies where (host like '%google%' or host like '%youtube%') and name in (?,?,?,?)", want)}
+            con.close()
+        except (OSError, sqlite3.Error):
+            continue
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        if len(found) >= 2:
+            return os.path.basename(os.path.dirname(db))
+    return None
+
+
+def _pot_version():
+    """bgutil PO token provayderi (127.0.0.1:4416) işləyirmi → versiya və ya None."""
+    import json
+    import urllib.request
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:4416/ping", timeout=2) as r:
+            return json.load(r).get("version")
+    except (OSError, ValueError):
+        return None
+
+
 def diag():
     """Quraşdırma yoxlaması: versiyalar və lazımi alətlər."""
     import shutil
+    path = os.path.join(os.getcwd(), "bin") + os.pathsep + os.environ.get("PATH", "")
     info = {"python": sys.version.split()[0], "ffmpeg": bool(shutil.which("ffmpeg")),
-            "js": [n for n in ("deno", "node", "bun") if shutil.which(n)]}
+            "js": [n for n in ("deno", "node", "bun") if shutil.which(n, path=path)],
+            "deno": bool(shutil.which("deno", path=path)),        # yt-dlp YouTube yoxlaması üçün Deno (Node 20 dəstəklənmir)
+            "pot": _pot_version(), "firefox_login": _firefox_login()}
     for mod in ("yt_dlp", "aiogram"):
         try:
             m = __import__(mod)
             info[mod] = getattr(getattr(m, "version", m), "__version__", None) or getattr(m, "__version__", "ok")
-        except Exception:
+        except ImportError:
             info[mod] = None
     st = os.statvfs(".")
     info["free_mb"] = st.f_bavail * st.f_frsize // 1048576

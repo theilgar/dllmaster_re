@@ -37,12 +37,12 @@ class FakeSettings(Settings):
 def store(monkeypatch):
     monkeypatch.setattr(remote, "_S", FakeSettings())
     remote._gate.update(ev=None, decision=None, waiting=0, notified_at=0.0, msg=None)
-    remote._down.update(until=0.0, error="", at=0.0)
-    remote.last_check.update(at=0.0, ok=False, error="", info={})
+    monkeypatch.setattr(remote, "_servers", {})
+    monkeypatch.setattr(remote, "_dropped", [])
+    monkeypatch.setattr(remote, "_cfg_cache", {"raw": None, "cfgs": []})
     remote.stats.update(fallback=0, ip_retry=0)
     remote.PENDING.clear()
-    remote._inflight.clear()
-    st.perf_inp.update(stage=None, key=None, chat_id=None, panel_id=None)
+    st.perf_inp.update(stage=None, key=None, chat_id=None, panel_id=None, rmt_sid=None)
     from bot.core import yt_accounts
     monkeypatch.setattr(yt_accounts, "accounts", lambda: list(ACCOUNTS))
     monkeypatch.setattr(yt_accounts, "get", lambda i: next((a for a in ACCOUNTS if a["id"] == i), None))
@@ -50,14 +50,23 @@ def store(monkeypatch):
     yield
 
 
+def S(i: int = 0):
+    """i-ci server (köhnə tək-server ayarları 1-ci serverə çevrilir)."""
+    return remote.servers()[i]
+
+
+INFO = {"ram_mb": 1936, "free_mb": 50000, "yt_dlp": "2026.8.19", "deno": True, "pot": "2.0.1",
+        "ffmpeg": True, "firefox_login": "abc.default"}
+
+
 def configure(**kw):
-    """Hazır server: ünvan, açıq, uğurlu yoxlama (RAM 1936 MB)."""
+    """Hazır server: ünvan, açıq, uğurlu yoxlama (RAM 1936 MB). procs/user_procs → serverin slotları."""
     remote._S.put("host", "admin@203.0.113.5")
     remote._S.put("on", "1")
-    remote.last_check.update(at=time.time(), ok=True, error="",
-                             info={"ram_mb": 1936, "free_mb": 50000, "yt_dlp": "2026.8.19", "js": ["node"], "ffmpeg": True})
     for k, v in kw.items():
         remote._S.put(k, v)
+    S().last_check.update(at=time.time(), ok=True, error="", info=dict(INFO))
+    return S()
 
 
 def labels(kb):
@@ -75,17 +84,26 @@ def is_text(label: str) -> bool:
 
 def pages():
     """Hər səhifə bir neçə vəziyyətdə: (ad, (mətn, klaviatura))."""
-    out = [("hub-boş", V.remote_view()), ("bağlantı-boş", V.remote_conn_view()), ("slotlar-boş", V.remote_slots_view()),
+    out = [("hub-boş", V.remote_view()), ("serverlər-boş", V.remote_servers_view()),
            ("hesablar", V.remote_accounts_view()), ("yükləmə", V.remote_mode_view("download")),
-           ("upload", V.remote_mode_view("upload")), ("giriş-ünvan", V.remote_input_view("host")),
-           ("giriş-port", V.remote_input_view("port")), ("giriş-açar", V.remote_input_view("key", "⚠️ xəta"))]
+           ("upload", V.remote_mode_view("upload"))]
+    new = remote.add_server()
+    out += [("server-boş", V.remote_server_view(new.id)), ("slotlar-boş", V.remote_slots_view(new.id)),
+            ("giriş-ünvan", V.remote_input_view(new.id, "host")), ("giriş-port", V.remote_input_view(new.id, "port")),
+            ("giriş-ad", V.remote_input_view(new.id, "name")), ("silmə", V.remote_delete_view(new.id)),
+            ("giriş-açar", V.remote_input_view(new.id, "key", "⚠️ xəta"))]
+    remote._servers.clear()
+    remote._S.put("servers", None)
     configure(procs="16", download_mode="both", upload_mode="server")
+    remote.add_server("İkinci")
+    sid = S().id
     remote.stats.update(fallback=3, ip_retry=2)
-    remote.PENDING["/tmp/x.m4a"] = ("dl/x.m4a", 10)
-    out += [("hub-işləyir", V.remote_view("not")), ("bağlantı-hazır", V.remote_conn_view()),
-            ("slotlar-çox", V.remote_slots_view()), ("yükləmə-ikisi", V.remote_mode_view("download", "✓ ok"))]
+    remote.PENDING["/tmp/x.m4a"] = ("dl/x.m4a", 10, sid)
+    out += [("hub-işləyir", V.remote_view("not")), ("serverlər", V.remote_servers_view("ok")),
+            ("server-hazır", V.remote_server_view(sid, "ok")), ("server-ff", V.remote_server_view(sid)),
+            ("slotlar-çox", V.remote_slots_view(sid, "ok")), ("yükləmə-ikisi", V.remote_mode_view("download", "✓ ok"))]
     remote._gate["waiting"] = 2
-    remote._down.update(until=time.time() + 30, error="uzaq işçi başlamadı")
+    S().down.update(until=time.time() + 30, error="uzaq işçi başlamadı")
     out.append(("hub-gözləyir", V.remote_view()))
     remote._S.put("auto", "1")
     out.append(("hub-avto", V.remote_view()))
@@ -100,7 +118,7 @@ def test_every_page_follows_panel_rules():
         assert len(text) <= 4000, name
         rows = kb.inline_keyboard
         nav = rows[-1]
-        assert "menu:main" in [b.callback_data for b in nav] or name.startswith("giriş"), f"{name}: son sətir naviqasiyadır"
+        assert "menu:main" in [b.callback_data for b in nav] or name.startswith(("giriş", "silmə")), f"{name}: son sətir naviqasiyadır"
         for row in rows[:-1]:
             assert sum(is_text(b.text) for b in row) <= 2, f"{name}: sətirdə 2-dən çox mətnli düymə {[b.text for b in row]}"
             assert len(row) <= 5, name
@@ -141,6 +159,19 @@ def test_hub_when_server_down_offers_decision_buttons():
     assert kb.inline_keyboard[1][0].text == "🏠 Evə keç"
 
 
+def test_hub_warns_when_the_server_ip_is_rejected_by_youtube():
+    configure()
+    _, kb = V.remote_view()
+    assert "menu:rmt:fix:home" not in datas(kb)
+    remote._ip_block["streak"] = remote.IP_BLOCK_AFTER
+    try:
+        text, kb = V.remote_view()
+        assert "IP-si YouTube tərəfindən rədd edilir" in text and "Cookies kömək etmir" in text
+        assert datas(kb)[:2] == ["menu:rmt:fix:home", "menu:rmt:fix:auto"]          # gözləyən iş yoxdur → «yenidən yoxla» yoxdur
+    finally:
+        remote._ip_block["streak"] = 0
+
+
 def test_upload_shows_home_when_download_is_home():
     configure(download_mode="home", upload_mode="server")
     text, _ = V.remote_view()
@@ -178,8 +209,14 @@ def test_conn_page_shows_setup_steps_until_first_success():
     configure(key="/home/user/.ssh/dlm_vps")
     text, _ = V.remote_conn_view()
     assert "Qurmaq üçün" not in text and "uğurlu" in text and "yt-dlp 2026.8.19" in text and "dlm_vps" in text
-    remote.last_check.update(info={"ram_mb": 1936, "js": []})
-    assert "deno və ya node" in V.remote_conn_view()[0]
+    remote.last_check.update(info={"ram_mb": 1936, "deno": False, "pot": None})
+    text = V.remote_conn_view()[0]
+    assert "Deno lazımdır" in text and "Node 20 dəstəklənmir" in text and "Deno ❌" in text and "PO token ❌" in text
+    remote.last_check.update(info={"ram_mb": 1936, "deno": True, "pot": None})
+    assert "PO token provayderi işləmir" in V.remote_conn_view()[0]
+    remote.last_check.update(info={"ram_mb": 1936, "deno": True, "pot": "2.0.1", "ffmpeg": True})
+    text = V.remote_conn_view()[0]
+    assert "Deno ✅" in text and "PO token ✅" in text and "lazımdır" not in text
     remote.last_check.update(ok=False, error="ssh qoşulmadı")
     text, _ = V.remote_conn_view()
     assert "❌ ssh qoşulmadı" in text and "Əvvəlki uğurlu yoxlamadan: RAM 1.9 GB" in text
@@ -302,7 +339,7 @@ async def test_accounts_toggle(click):
     await click("menu:rmt:acc:a1b2c3d4")
     assert not remote.acc_allowed("a1b2c3d4") and "yalnız evdə" in click.shown[-1][0]
     await click("menu:rmt:acc:yoxdur")                                       # naməlum hesab: heç nə olmur
-    assert "Serverdə açıq: <b>0</b>" in click.shown[-1][0]
+    assert "Evdən göndərilən hesab: <b>0</b>" in click.shown[-1][0]
 
 
 async def test_decision_buttons(click, monkeypatch):
@@ -443,3 +480,24 @@ async def test_menu_router_dispatches_rmt_callbacks(monkeypatch):
         await mr.menu_callback(cb)
         assert needle in shown[-1][0], data
     assert len(shown) == 5
+
+
+def test_accounts_page_explains_the_servers_own_firefox_and_shows_login_state():
+    configure()
+    text, kb = V.remote_accounts_view()
+    assert "Serverin öz Firefox-u" in text and "Serverin Firefox-unda giriş: ✅ <b>var</b>" in text
+    assert kb.inline_keyboard[0][0].text == "🦊 Serverin Firefox-u: 🔴 Deaktiv" and kb.inline_keyboard[0][0].callback_data == "menu:rmt:acc:ff"
+    remote.last_check.update(info={"ram_mb": 1936, "firefox_login": None})
+    assert "❌ <b>tapılmadı</b>" in V.remote_accounts_view()[0]
+    remote.last_check.update(at=0.0, info={})
+    assert "hələ yoxlanmayıb" in V.remote_accounts_view()[0]
+    remote.set_server_firefox(True)
+    text, kb = V.remote_accounts_view()
+    assert kb.inline_keyboard[0][0].text == "🦊 Serverin Firefox-u: 🟢 Aktiv" and "hesablar serverə göndərilmir" in text
+
+
+async def test_server_firefox_toggle(click):
+    await click("menu:rmt:acc:ff")
+    assert remote.server_firefox() and "cookies serverdə oxunur" in click.shown[-1][0]
+    await click("menu:rmt:acc:ff")
+    assert not remote.server_firefox() and "evdəki hesablar" in click.shown[-1][0]
