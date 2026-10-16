@@ -33,8 +33,45 @@ logger = logging.getLogger(__name__)
 PRIORITY = 12                      # links_plugin (10)-dən sonra, music_plugin-dən ƏVVƏL: link axtarış sayılmasın
 
 TT_RE = re.compile(r"https?://(?:[\w-]+\.)?tiktok\.com/[^\s]+", re.I)
-GENERIC = ("original sound", "orijinal ses", "orijinal səs", "orijinal ses", "оригинальный звук", "son original",
-           "sonido original", "som original", "original audio", "suara asli")
+GENERIC = (
+    "original sound", "original audio", "original music", "original track", "original video",
+    "orijinal ses", "orijinal səs", "özgün ses", "özgün səs",
+    "оригинальный звук", "оригинальное аудио", "оригинальный трек",
+    "оригінальний звук", "оригінальне аудіо", "оригінальний трек",
+    "арыгінальны гук", "арыгінальнае аўдыя",
+    "son original", "sonido original", "som original", "suono originale",
+    "originalton", "original-ton", "dźwięk oryginalny",
+    "suara asli", "bunyi asal", "âm thanh gốc", "orihinal na tunog",
+    "origineel geluid", "oorspronkelijk geluid", "sunet original",
+    "ursprungligt ljud", "original lyd", "původní zvuk", "pôvodný zvuk",
+    "originalni zvuk", "оригинален звук", "eredeti hang",
+    "原声", "原聲", "原始声音", "オリジナル楽曲", "オリジナル音声", "오리지널 사운드",
+    "الصوت الأصلي", "صدای اصلی", "צلیل מקורי", "मूल ध्वनि", "मूल ऑडियो",
+)
+_GENERIC_PATTERNS = re.compile(
+    r"(?i)(?:"
+    r"\boriginal\s*(?:sound|audio|track|music)?\b|"
+    r"\boriginalton\b|"
+    r"\borijinal\s*s[eə]s\b|"
+    r"\bözgün\s*s[eə]s\b|"
+    r"оригин[ая]льн(?:ый|ое|ая|ий|е|ен)?\s*(?:звук|аудио|трек)?|"
+    r"арыгінальн(?:ы|ае)?\s*гук|"
+    r"son(?:ido)?\s*original|"
+    r"som\s*original|"
+    r"suono\s*originale|"
+    r"dźwięk\s*oryginalny|"
+    r"suara\s*asli|"
+    r"bunyi\s*asal|"
+    r"âm\s*thanh\s*gốc|"
+    r"orihinal\s*na\s*tunog|"
+    r"原[声聲]|"
+    r"オリジナル[楽曲音声]|"
+    r"오리지널\s*사운드|"
+    r"الصوت\s*الأصلي|"
+    r"صدای\s*اصلی|"
+    r"צلیل\s*מקורי"
+    r")"
+)
 MIN_FULL, MAX_FULL = 100, 600      # "tam mahnı" müddəti (san.): TikTok fraqmentindən fərqli olaraq
 
 
@@ -47,20 +84,49 @@ def is_generic_sound(track: str, uploader: str = "") -> bool:
     low = (track or "").strip().lower()
     if not low:
         return True
-    if any(g in low for g in GENERIC):
+    if any(g in low for g in GENERIC) or _GENERIC_PATTERNS.search(low):
         return True
-    return bool(uploader) and low.startswith(uploader.strip().lower()) and "-" not in low
+    if uploader:
+        u_low = uploader.strip().lower()
+        if u_low:
+            if low == u_low or low == f"@{u_low}":
+                return True
+            rem = low.replace(f"@{u_low}", "").replace(u_low, "").strip(" -_—:.,|•()[]{}#~")
+            if not rem or len(rem) <= 2:
+                return True
+            if any(g in rem for g in GENERIC) or _GENERIC_PATTERNS.search(rem):
+                return True
+    return False
+
+
+def is_official_music(title: str, artist: str = "", uploader: str = "", is_original: bool | None = None) -> bool:
+    """Musiqi adının rəsmi (lisenziyalı) olub-olmadığını yoxlayır. Rəsmi deyilsə False qaytarır."""
+    if is_original is True:
+        return False
+    t = (title or "").strip()
+    if not t:
+        return False
+    if is_generic_sound(t, uploader or artist):
+        return False
+    if artist and is_generic_sound(artist, uploader):
+        return False
+    if uploader:
+        u_clean = uploader.strip().lower()
+        if t.lower() in (u_clean, f"@{u_clean}"):
+            return False
+    return True
 
 
 def info_to_query(info: dict):
-    """yt-dlp məlumatından (artist, ad) və ya None."""
+    """yt-dlp məlumatından (artist, ad) — yalnız rəsmi musiqidirsə."""
     track = (info.get("track") or "").strip()
     artist = (info.get("artist") or "").strip()
     if not artist and info.get("artists"):
         artist = ", ".join(a for a in info["artists"][:2] if a)
-    if track and not is_generic_sound(track, info.get("uploader") or ""):
-        return artist, track
-    return None
+    uploader = (info.get("uploader") or info.get("channel") or "").strip()
+    if not is_official_music(track, artist, uploader):
+        return None
+    return artist, track
 
 
 _JSON_SCRIPT = re.compile(r'<script[^>]+id="(?:__UNIVERSAL_DATA_FOR_REHYDRATION__|SIGI_STATE)"[^>]*>(.*?)</script>', re.S)
@@ -142,12 +208,14 @@ def url_variants(url: str) -> list:
 
 
 def page_to_query(page: dict):
-    """Səhifə məlumatından (artist, ad) — yalnız orijinal səs deyilsə."""
-    if not page or not page.get("title") or is_generic_sound(page["title"], page.get("author") or ""):
+    """Səhifə məlumatından (artist, ad) — yalnız rəsmi musiqidirsə."""
+    if not page or not page.get("title"):
         return None
-    if page.get("original") and not page.get("author"):
+    title = (page.get("title") or "").strip()
+    author = (page.get("author") or "").strip()
+    if not is_official_music(title, author, is_original=page.get("original")):
         return None
-    return page.get("author") or "", page["title"]
+    return author or "", title
 
 
 def pick_full(query: str, results: list):
@@ -335,31 +403,35 @@ def setup(context):
         async def stage(n: int, label: str):
             await say(tr("🎵 <i>TikTok mahnısı axtarılır — mərhələ {n}/{m}: {label}...</i>", n=n, m=STAGES, label=tr(label)))
 
-        # 1) yt-dlp məlumatı
-        await stage(1, "TikTok məlumatı")
-        for u in url_variants(url):
-            try:
-                info = await _extract(u)
-                found = info_to_query(info)
-                if found:
-                    source = "TikTok"
-                    break
-            except Exception as e:
-                logger.info(f"TikTok məlumatı alınmadı ({u[:70]}): {str(e)[:120]}")
-        # 2) səhifənin music bloku
-        if not found:
-            await stage(2, "səhifədəki musiqi bloku")
-            page = await _page_music(url)
-            found = page_to_query(page)
-            if found:
-                source = tr("TikTok səhifəsi")
+        # 1) səhifənin musiqi bloku (rəsmi / orijinal səs yoxlanışı)
+        await stage(1, "səhifədəki musiqi bloku")
+        page = await _page_music(url)
+        found = page_to_query(page)
+        if found:
+            source = tr("TikTok səhifəsi")
+
+        # 2) yt-dlp məlumatı (əgər səhifə açılmasa və orijinal səs kimi qeyd olunmayıbsa)
+        if not found and not (page and page.get("original")):
+            await stage(2, "TikTok məlumatı")
+            for u in url_variants(url):
+                try:
+                    info = await _extract(u)
+                    found = info_to_query(info)
+                    if found:
+                        source = "TikTok"
+                        break
+                except Exception as e:
+                    logger.info(f"TikTok məlumatı alınmadı ({u[:70]}): {str(e)[:120]}")
+
+        # Musiqi rəsmi deyilsə (və ya orijinal səsdirsə) → Shazam ilə tanımağa başlayır:
         # 3) səsin ayrıca faylı (danışıqsız musiqi) → Shazam
         if not found and page and page.get("play_url"):
             await stage(3, "səsin təmiz faylı → Shazam")
             found = await _shazam_sound(page["play_url"])
             if found:
                 source = tr("Shazam (səs faylı)")
-        # 4) videonun səsi → Shazam
+
+        # 4) videonun səsi → Shazam (çoxmərhələli)
         if not found:
             await stage(4, "videonun səsi → Shazam (çoxmərhələli)")
             found = await _shazam_from_video(url)

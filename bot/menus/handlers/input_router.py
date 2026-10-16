@@ -27,6 +27,7 @@ from bot.menus.state import (
     ab_inp,
     get_context,
     grp_inp,
+    inv_inp,
     is_creator,
     panel_editor,
     perf_inp,
@@ -37,6 +38,7 @@ from bot.menus.state import (
     upd_inp,
     us,
     wm,
+    wprem_inp,
 )
 from bot.menus.views.audit import (
     _lg,
@@ -763,6 +765,137 @@ async def sudo_pwd_input(message: Message):
         )
 
 
+# ── 🎁 12. Dəvət sistemi üçün Premium günü daxil edilməsi ──
+async def waiting_invite_days(message: Message) -> bool:
+    return inv_inp.get("stage") == "await_invite_days" and is_creator(message.from_user.id)
+
+
+async def invite_days_input(message: Message):
+    ctx = get_context()
+    raw = (message.text or "").strip()
+    with contextlib.suppress(Exception):
+        await message.delete()
+
+    panel_args = dict(chat_id=inv_inp["chat_id"], message_id=inv_inp["panel_id"], parse_mode="HTML")
+    from common.database import set_invite_reward_days
+    from bot.menus.views.invites import invite_view
+
+    if not raw.isdigit() or int(raw) < 1 or int(raw) > 3650:
+        inv_inp["stage"] = "await_invite_days"
+        text = (
+            "⚠️ <b>Yalnız 1–3650 arası tam rəqəm daxil edin!</b>\n\n"
+            f"Daxil edilən: <code>{escape(raw[:20])}</code>\n"
+            "Zəhmət olmasa yenidən cəhd edin və ya geri qayıdın:"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[nav_row("inv_cfg")])
+        with contextlib.suppress(Exception):
+            await ctx.bot.edit_message_text(text=text, reply_markup=kb, **panel_args)
+        return
+
+    days = int(raw)
+    set_invite_reward_days(days)
+    inv_inp["stage"] = None
+    note = f"✅ Hər 1 dəvət üçün {days} gün Premium təyin edildi"
+    text, kb = invite_view(note)
+    with contextlib.suppress(Exception):
+        await ctx.bot.edit_message_text(text=text, reply_markup=kb, **panel_args)
+    logger.info("🎁 Dəvət mükafatı günləri dəyişdirildi: %s gün", days)
+
+
+# ── 🎉 13. Xoş gəldin Premium-u (gün / tarix) daxil edilməsi ──
+async def waiting_wprem_days(message: Message) -> bool:
+    return wprem_inp.get("stage") == "await_wprem_days" and is_creator(message.from_user.id)
+
+
+async def waiting_wprem_date(message: Message) -> bool:
+    return wprem_inp.get("stage") == "await_wprem_date" and is_creator(message.from_user.id)
+
+
+async def welcome_prem_days_input(message: Message):
+    ctx = get_context()
+    raw = (message.text or "").strip()
+    with contextlib.suppress(Exception):
+        await message.delete()
+
+    panel_args = dict(chat_id=wprem_inp.get("chat_id"), message_id=wprem_inp.get("panel_id"), parse_mode="HTML")
+    from common.database import set_welcome_prem_days
+    from bot.menus.views.welcome_prem import welcome_prem_view
+
+    if not raw.isdigit() or int(raw) < 1 or int(raw) > 3650:
+        wprem_inp["stage"] = "await_wprem_days"
+        text = (
+            "⚠️ <b>Yalnız 1–3650 arası tam rəqəm daxil edin!</b>\n\n"
+            f"Daxil edilən: <code>{escape(raw[:20])}</code>\n"
+            "Zəhmət olmasa yenidən cəhd edin və ya geri qayıdın:"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[nav_row("wprem_cfg")])
+        with contextlib.suppress(Exception):
+            await ctx.bot.edit_message_text(text=text, reply_markup=kb, **panel_args)
+        return
+
+    days = int(raw)
+    set_welcome_prem_days(days)
+    wprem_inp["stage"] = None
+    note = f"✅ Xoş gəldin sınaq müddəti {days} gün təyin edildi"
+    text, kb = welcome_prem_view(note)
+    with contextlib.suppress(Exception):
+        await ctx.bot.edit_message_text(text=text, reply_markup=kb, **panel_args)
+    logger.info("🎉 Xoş gəldin premium günləri dəyişdirildi: %s gün", days)
+
+
+async def welcome_prem_date_input(message: Message):
+    ctx = get_context()
+    raw = (message.text or "").strip()
+    with contextlib.suppress(Exception):
+        await message.delete()
+
+    panel_args = dict(chat_id=wprem_inp.get("chat_id"), message_id=wprem_inp.get("panel_id"), parse_mode="HTML")
+    from bot.core.stars import parse_sale_time
+    from common.database import set_welcome_prem_until
+    from bot.menus.views.welcome_prem import welcome_prem_view
+
+    try:
+        ts = parse_sale_time(raw)
+    except ValueError:
+        wprem_inp["stage"] = "await_wprem_date"
+        text = (
+            "⚠️ <b>Format başa düşülmədi!</b>\n\n"
+            f"Daxil edilən: <code>{escape(raw[:30])}</code>\n\n"
+            "Nümunələr:\n"
+            "• <code>25.12.2026 18:00</code> (dəqiq tarix)\n"
+            "• <code>18:00</code> (bu gün saat 18:00)\n"
+            "• <code>+3g</code> (3 gün sonra)\n"
+            "• <code>+12s</code> (12 saat sonra)\n"
+            "• <code>-</code> (tarixi ləğv etmək)"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[nav_row("wprem_cfg")])
+        with contextlib.suppress(Exception):
+            await ctx.bot.edit_message_text(text=text, reply_markup=kb, **panel_args)
+        return
+
+    now = int(time.time())
+    if ts is not None and ts <= now:
+        wprem_inp["stage"] = "await_wprem_date"
+        text = (
+            "⚠️ <b>Göstərilən vaxt artıq keçmişdir!</b>\n\n"
+            f"Daxil edilən: <code>{escape(raw[:30])}</code>\n"
+            "Zəhmət olmasa gələcək bir tarix və ya nisbi vaxt (+3g) yazın:"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[nav_row("wprem_cfg")])
+        with contextlib.suppress(Exception):
+            await ctx.bot.edit_message_text(text=text, reply_markup=kb, **panel_args)
+        return
+
+    set_welcome_prem_until(ts)
+    wprem_inp["stage"] = None
+    note = "✅ Xoş gəldin kampaniya bitmə tarixi təyin edildi" if ts else "✅ Kampaniya tarixi təmizləndi"
+    text, kb = welcome_prem_view(note)
+    with contextlib.suppress(Exception):
+        await ctx.bot.edit_message_text(text=text, reply_markup=kb, **panel_args)
+    logger.info("🎉 Xoş gəldin premium bitmə tarixi dəyişdirildi: %s", ts)
+
+
+
 def register_input_handlers(router: Router):
     router.message.register(
         premium_user_input,
@@ -851,4 +984,25 @@ def register_input_handlers(router: Router):
         F.chat.type == "private",
         F.text,
         waiting_sudo_pwd,
+    )
+    router.message.register(
+        invite_days_input,
+        F.chat.type == "private",
+        F.text,
+        ~F.text.startswith("/"),
+        waiting_invite_days,
+    )
+    router.message.register(
+        welcome_prem_days_input,
+        F.chat.type == "private",
+        F.text,
+        ~F.text.startswith("/"),
+        waiting_wprem_days,
+    )
+    router.message.register(
+        welcome_prem_date_input,
+        F.chat.type == "private",
+        F.text,
+        ~F.text.startswith("/"),
+        waiting_wprem_date,
     )

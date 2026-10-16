@@ -65,6 +65,11 @@ async def user_menu_view(bot, user) -> tuple[str, InlineKeyboardMarkup]:
     rows = []
     rows.append([InlineKeyboardButton(text="🎛 Audio formatı (/codec)", callback_data="codec:panel")])
 
+    from common.database import is_invite_enabled
+
+    if is_invite_enabled():
+        rows.append([InlineKeyboardButton(text="🎁 Dəvət et & Premium qazan", callback_data="umenu:invite")])
+
     rows.append([
         InlineKeyboardButton(text="👥 Qruplarım", callback_data="umenu:groups"),
         InlineKeyboardButton(text="💎 Premium", callback_data="umenu:premium"),

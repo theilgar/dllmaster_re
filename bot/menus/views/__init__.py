@@ -78,6 +78,13 @@ from bot.menus.views.home import (
     main_kb,
     main_text,
 )
+from bot.menus.views.invites import (
+    invite_top_view,
+    invite_view,
+    user_invite_data,
+    user_invite_view,
+)
+from bot.menus.views.welcome_prem import welcome_prem_view
 from bot.menus.views.messages import (
     CAPTION_LIMIT,
     MS_WHERE,
@@ -286,6 +293,8 @@ __all__ = [
     "health_view",
     "help_view",
     "home_view",
+    "invite_top_view",
+    "invite_view",
     "live_view",
     "main_kb",
     "main_text",
@@ -340,6 +349,8 @@ __all__ = [
     "upd_view",
     "user_card",
     "user_groups_view",
+    "user_invite_data",
+    "user_invite_view",
     "user_label",
     "user_menu_view",
     "userbot_hub_view",
@@ -349,6 +360,7 @@ __all__ = [
     "va_button_label",
     "web_profile_view",
     "web_profiles_view",
+    "welcome_prem_view",
     "yt_button_label",
     "yt_hub_view",
     "yt_picker_view",

@@ -132,4 +132,30 @@ async def rec_command(message: Message):
         await message.answer(text, parse_mode="HTML", reply_markup=kb)
 
 
+@router.message(Command("invite", "ref", "davet", "dovet", ignore_mention=True))
+async def invite_command(message: Message):
+    bot_user = await message.bot.me()
+    bot_username = bot_user.username or "dllmasterbot"
+    if message.chat.type != "private":
+        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[[
+                InlineKeyboardButton(text="🎁 Dəvət linki al (Şəxsi)", url=f"https://t.me/{bot_username}?start=invite")
+            ]]
+        )
+        await message.reply(
+            "🎁 <b>Dəvət Sistemi:</b> Hər dəvət etdiyiniz dost üçün pulsuz Premium qazanın!\n"
+            "Dəvət linkinizi almaq üçün bota şəxsidə yazın:",
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
+        return
+
+    from bot.menus.views.invites import user_invite_view
+
+    text, kb = await user_invite_view(message.from_user, bot_username)
+    await message.answer(text, parse_mode="HTML", reply_markup=kb)
+
+
 __all__ = ["router"]

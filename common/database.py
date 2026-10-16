@@ -219,6 +219,21 @@ _SCHEMA = [
         ts      BIGINT NOT NULL
     )""",
     "CREATE INDEX IF NOT EXISTS idx_userbot_log_ns_ts ON userbot_log(ns, ts)",
+    """CREATE TABLE IF NOT EXISTS invites (
+        invited_id  BIGINT PRIMARY KEY,
+        inviter_id  BIGINT NOT NULL,
+        reward_days INTEGER NOT NULL DEFAULT 0,
+        created_at  BIGINT NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_invites_inviter ON invites(inviter_id)",
+    """CREATE TABLE IF NOT EXISTS welcome_trials (
+        user_id    BIGINT PRIMARY KEY,
+        mode       TEXT NOT NULL,
+        days       INTEGER,
+        until      BIGINT NOT NULL,
+        created_at BIGINT NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_welcome_trials_until ON welcome_trials(until)",
     # Gələcək sütun əlavələri buraya: ALTER TABLE x ADD COLUMN IF NOT EXISTS y TYPE
 ]
 
@@ -507,6 +522,25 @@ class Database:
         self._prem_cache.pop(user_id, None)
         return row["until"] if row else None
 
+    def grant_premium_until(self, user_id, until_ts: int, granted_by=None, conn=None):
+        """Müəyyən tarixədək (until_ts) premium verir. Mövcud ömürlük toxunulmaz qalır."""
+        params = {"uid": user_id, "until": int(until_ts), "now": int(time.time()), "by": granted_by}
+        self._prem_cache.pop(user_id, None)
+        sql = """
+            INSERT INTO premium(user_id, until, granted_at, granted_by)
+            VALUES(%(uid)s, %(until)s, %(now)s, %(by)s)
+            ON CONFLICT(user_id) DO UPDATE SET
+                until = CASE WHEN premium.until IS NULL THEN NULL
+                             ELSE GREATEST(premium.until, %(until)s) END,
+                granted_at = excluded.granted_at, granted_by = excluded.granted_by
+            RETURNING until"""
+        if conn is not None:
+            row = conn.execute(sql, params).fetchone()
+        else:
+            row = self._one(sql, params)
+        self._prem_cache.pop(user_id, None)
+        return row["until"] if row else None
+
     def pay_and_grant(self, user_id, plan, days, stars, charge_id, granted_by=0):
         """⭐ Ödənişi qeyd et + premium ver — BİR tranzaksiyada. Təkrar charge_id → (0, None).
         Əvvəl add_payment ayrıca commit olunurdu: grant_premium xəta versəydi, Telegram-ın təkrar
@@ -545,6 +579,92 @@ class Database:
         self._exec("UPDATE premium SET until=%s WHERE user_id=%s", (until, user_id))
         self._prem_cache.pop(user_id, None)
         return until
+
+    # ───────────── 🎁 dəvət (invite / referral) sistemi ─────────────
+    def record_invite(self, invited_id: int, inviter_id: int, reward_days: int) -> bool:
+        """Yeni dəvəti qeydə alır. Artıq dəvət edilibsə False qaytarır."""
+        now = int(time.time())
+        try:
+            res = self._exec(
+                """INSERT INTO invites(invited_id, inviter_id, reward_days, created_at)
+                   VALUES(%s, %s, %s, %s)
+                   ON CONFLICT(invited_id) DO NOTHING""",
+                (invited_id, inviter_id, reward_days, now),
+            )
+            return res > 0
+        except Exception as e:
+            logger.warning(f"Dəvət qeydiyyatı xətası: {e}")
+            return False
+
+    def is_invited(self, user_id: int) -> bool:
+        row = self._one("SELECT 1 FROM invites WHERE invited_id=%s", (user_id,))
+        return bool(row)
+
+    def get_user_invite_stats(self, inviter_id: int) -> dict:
+        row = self._one(
+            "SELECT COUNT(*) AS cnt, COALESCE(SUM(reward_days), 0) AS total_days FROM invites WHERE inviter_id=%s",
+            (inviter_id,),
+        )
+        return {
+            "count": int((row or {}).get("cnt") or 0),
+            "total_days": int((row or {}).get("total_days") or 0),
+        }
+
+    def get_global_invite_stats(self) -> dict:
+        row = self._one(
+            """SELECT COUNT(*) AS total_invites,
+                      COUNT(DISTINCT inviter_id) AS unique_inviters,
+                      COALESCE(SUM(reward_days), 0) AS total_days
+               FROM invites"""
+        )
+        return {
+            "total_invites": int((row or {}).get("total_invites") or 0),
+            "unique_inviters": int((row or {}).get("unique_inviters") or 0),
+            "total_days": int((row or {}).get("total_days") or 0),
+        }
+
+    def get_top_inviters(self, limit: int = 10) -> list[dict]:
+        rows = self._all(
+            """SELECT inviter_id, COUNT(*) AS count, COALESCE(SUM(reward_days), 0) AS total_days
+               FROM invites
+               GROUP BY inviter_id
+               ORDER BY count DESC
+               LIMIT %s""",
+            (limit,),
+        )
+        return [dict(r) for r in rows]
+
+    # ───────────── 🎉 xoş gəldin (yeni istifadəçi) sınaq premium-u ─────────────
+    def record_welcome_trial(self, user_id: int, mode: str, days: int | None, until: int) -> bool:
+        """Yeni istifadəçinin xoş gəldin sınağını qeydə alır. Artıq alıbsa False qaytarır."""
+        now = int(time.time())
+        try:
+            res = self._exec(
+                """INSERT INTO welcome_trials(user_id, mode, days, until, created_at)
+                   VALUES(%s, %s, %s, %s, %s)
+                   ON CONFLICT(user_id) DO NOTHING""",
+                (user_id, mode, days, until, now),
+            )
+            return res > 0
+        except Exception as e:
+            logger.warning(f"Welcome trial qeydiyyatı xətası: {e}")
+            return False
+
+    def has_welcome_trial(self, user_id: int) -> bool:
+        row = self._one("SELECT 1 FROM welcome_trials WHERE user_id=%s", (user_id,))
+        return bool(row)
+
+    def get_welcome_trial_stats(self) -> dict:
+        row = self._one(
+            """SELECT COUNT(*) AS total_trials,
+                      COUNT(*) FILTER (WHERE until > %s) AS active_trials
+               FROM welcome_trials""",
+            (int(time.time()),),
+        )
+        return {
+            "total_trials": int((row or {}).get("total_trials") or 0),
+            "active_trials": int((row or {}).get("active_trials") or 0),
+        }
 
     # ───────────── 📦 audio keşi (depo kanalı) ─────────────
     def cache_get(self, video_id: str):
@@ -1479,6 +1599,7 @@ START_BUTTON_META = {
     "inline":     {"label": "🔎 İnline axtarış",   "scope": "private", "desc": "Çatlarda @bot ilə sürətli axtarış"},
     "audio_edit": {"label": "✏️ Metadata redaktə", "scope": "private", "desc": "Audio başlıq və örtük şəkli redaktəsi"},
     "playlists":  {"label": "🎶 Playlistlərim",    "scope": "private", "desc": "Şəxsi musiqi playlistləri"},
+    "invite":     {"label": "🎁 Dəvət et",        "scope": "private", "desc": "Dostları dəvət et & Premium qazan"},
     "premium":    {"label": "💎 Premium al",       "scope": "private", "desc": "Telegram Stars ilə abunəlik"},
     "tip":        {"label": "⭐ Bəxşiş göndər",    "scope": "private", "desc": "Bota könüllü dəstək bəxşişi"},
     "lang":       {"label": "🌐 Dil seçimi",       "scope": "private", "desc": "İnterfeys dili menyusu"},
@@ -1578,5 +1699,99 @@ def get_userbot_inline_disabled_chats() -> list[int]:
     except Exception as _e:
         logger.debug("udulan xəta [common/database.py:1537]: %r", _e)
     return sorted(chats)
+
+
+# ───────────── 🎁 Dəvət sistemi parametrləri ─────────────
+def is_invite_enabled() -> bool:
+    val = get_setting("invite:enabled", "1")
+    return str(val).lower() in _TRUE
+
+
+def set_invite_enabled(enabled: bool):
+    set_setting("invite:enabled", "1" if enabled else "0")
+
+
+def get_invite_reward_days() -> int:
+    try:
+        val = int(get_setting("invite:reward_days", "3") or 3)
+        return max(1, val)
+    except (TypeError, ValueError):
+        return 3
+
+
+def set_invite_reward_days(days: int):
+    set_setting("invite:reward_days", str(max(1, int(days))))
+
+
+def grant_premium(user_id, days, granted_by=None):
+    try:
+        return get_db().grant_premium(user_id, days, granted_by)
+    except Exception as e:
+        logger.warning(f"Grant premium xətası: {e}")
+        return None
+
+
+# ───────────── 🎉 Xoş gəldin (yeni istifadəçi) Premium parametrləri ─────────────
+def is_welcome_prem_enabled() -> bool:
+    val = get_setting("welcome_prem:enabled", "0")
+    return str(val).lower() in _TRUE
+
+
+def set_welcome_prem_enabled(enabled: bool):
+    set_setting("welcome_prem:enabled", "1" if enabled else "0")
+
+
+def get_welcome_prem_mode() -> str:
+    """Rejim: 'days' (sınaq günləri) və ya 'date' (konkret bitmə tarixi)."""
+    mode = str(get_setting("welcome_prem:mode", "days") or "days").lower()
+    return "date" if mode == "date" else "days"
+
+
+def set_welcome_prem_mode(mode: str):
+    set_setting("welcome_prem:mode", "date" if mode == "date" else "days")
+
+
+def get_welcome_prem_days() -> int:
+    try:
+        val = int(get_setting("welcome_prem:days", "3") or 3)
+        return max(1, min(3650, val))
+    except (TypeError, ValueError):
+        return 3
+
+
+def set_welcome_prem_days(days: int):
+    set_setting("welcome_prem:days", str(max(1, min(3650, int(days)))))
+
+
+def get_welcome_prem_until() -> int | None:
+    try:
+        val = get_setting("welcome_prem:until")
+        return int(val) if val and str(val).isdigit() else None
+    except (TypeError, ValueError):
+        return None
+
+
+def set_welcome_prem_until(until: int | None):
+    set_setting("welcome_prem:until", str(int(until)) if until else "")
+
+
+def is_welcome_prem_active(now: int | None = None) -> bool:
+    if not is_welcome_prem_enabled():
+        return False
+    mode = get_welcome_prem_mode()
+    if mode == "days":
+        return True
+    ts = get_welcome_prem_until()
+    current_ts = int(now or time.time())
+    return bool(ts and ts > current_ts)
+
+
+def grant_premium_until(user_id, until_ts: int, granted_by=None):
+    try:
+        return get_db().grant_premium_until(user_id, until_ts, granted_by)
+    except Exception as e:
+        logger.warning(f"Grant premium until xətası: {e}")
+        return None
+
 
 

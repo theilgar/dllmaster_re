@@ -14,6 +14,21 @@ def _t(en, ru, tr):
 
 EXTRA = {
     # ── səsli yayım / növbə ──
+    "🎙 Canlı yayımda oxut": _t("🎙 Play in live stream", "🎙 Воспроизвести в эфире", "🎙 Canlı yayında çal"),
+    "🎙 Canlı yayıma əlavə edilir...": _t("🎙 Adding to live stream...", "🎙 Добавление в эфир...", "🎙 Canlı yayına ekleniyor..."),
+    "🔴 Canlı yayım asistanı söndürülüb və ya qoşulmayıb": _t(
+        "🔴 Voice assistant is disabled or not connected",
+        "🔴 Голосовой ассистент отключён или не подключён",
+        "🔴 Canlı yayın asistanı devre dışı veya bağlı değil"),
+    "🎙 <b>{name}</b>\n<i>Canlı yayıma əlavə edilir...</i>": _t(
+        "🎙 <b>{name}</b>\n<i>Adding to live stream...</i>",
+        "🎙 <b>{name}</b>\n<i>Добавление в эфир...</i>",
+        "🎙 <b>{name}</b>\n<i>Canlı yayına ekleniyor...</i>"),
+    "🎙 <b>{name}</b>\n✅ <b>{n}</b> mahnı canlı yayıma əlavə edildi!": _t(
+        "🎙 <b>{name}</b>\n✅ <b>{n}</b> songs added to live stream!",
+        "🎙 <b>{name}</b>\n✅ <b>{n}</b> песен добавлено в эфир!",
+        "🎙 <b>{name}</b>\n✅ <b>{n}</b> şarkı canlı yayına eklendi!"),
+    "❌ Siyahıda mahnı yoxdur": _t("❌ No songs in the list", "❌ В списке нет песен", "❌ Listede şarkı yok"),
     "<b>{n}</b> mahnı qalıb": _t("<b>{n}</b> songs left", "Осталось песен: <b>{n}</b>", "<b>{n}</b> şarkı kaldı"),
     "<i>... və daha {n} mahnı</i>": _t("<i>... and {n} more songs</i>", "<i>... и ещё {n} песен</i>", "<i>... ve {n} şarkı daha</i>"),
     "<i>Səsli yayım təkrar açılsın və növbə bərpa edilsin?</i>": _t(

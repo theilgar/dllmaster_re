@@ -41,6 +41,7 @@ SLOTS = {
     "edit":     {"label": "✏️ Metadata redaktə",      "setting": "guide_media:edit",     "default": "none"},
     "premium":  {"label": "💎 Premium",               "setting": "guide_media:premium",  "default": "none"},
     "tip":      {"label": "⭐ Bəxşiş",                "setting": "guide_media:tip",      "default": "none"},
+    "invite":   {"label": "🎁 Dəvət sistemi",         "setting": "guide_media:invite",   "default": "none"},
 }
 TYPE_LABELS = {
     "default": "🎞 Default GIF (patrick.gif)",
@@ -144,6 +145,10 @@ TEXT_SLOTS = {
     },
     "tip": {"label": "⭐ Bəxşiş", "media": "tip",
             "vars": {"{bot}": "botun username-i", "{creator}": "sənin username-in"}},
+    "invite": {
+        "label": "🎁 Dəvət sistemi", "media": "invite",
+        "vars": {"{bot}": "botun username-i", "{creator}": "sənin username-in"},
+    },
 }
 TEXT_LIMIT = 4096
 

@@ -18,9 +18,11 @@ from aiogram.enums import ChatMemberStatus
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramMigrateToChat
 from html import escape
 import asyncio
+import contextlib
 import json
 import logging
 import os
+import time
 
 from common.database import get_db, is_creator
 from common import i18n, tiers
@@ -187,6 +189,7 @@ DEFAULT_TEXTS = {
         "⏹ Yükləməni istənilən an dayandıra bilərsən\n"
         "🎙 <code>/artist ad</code> — ifaçının bütün mahnıları\n"
         "🎶 <code>/playlist</code> — sevdiyin mahnıları öz playlistlərinə yığ\n"
+        "🎁 <code>/invite</code> — dostlarını dəvət et, pulsuz Premium qazan\n"
         "✏️ Mənə audio göndər — adını, artistini və şəklini dəyişim\n\n"
         "{status}\n\n"
         "Bot @{creator} tərəfindən yaradılmışdır 🚀"
@@ -249,6 +252,12 @@ DEFAULT_TEXTS = {
         "3️⃣ <b>✅ Təsdiqlə</b> düyməsinə basın — yenilənmiş audio fayl dərhal sizə göndəriləcək!\n\n"
         "<i>ℹ️ Maksimum fayl həcmi: 50 MB (Telegram limiti).</i>"
     ),
+    "invite": (
+        "🎁 <b>Dostlarını dəvət et — Pulsuz Premium qazan!</b>\n\n"
+        "Dəvət etdiyin hər <b>1 dostun</b> üçün sənə 💎 <b>Premium</b> hədiyyə olunur!\n\n"
+        "🔗 Öz xüsusi linkini almaq və statistikana baxmaq üçün:\n"
+        "👉 <code>/invite</code> və ya aşağıdakı düyməyə bas."
+    ),
 }
 
 
@@ -277,6 +286,10 @@ def build_private_text(first_name: str, bot_username: str, user_id: int) -> str:
         "status": status_line(user_id),
         "creator": CREATOR_USERNAME,
     })
+    from common.database import is_invite_enabled
+    if not is_invite_enabled():
+        lines = [ln for ln in text.split("\n") if "/invite" not in ln]
+        text = "\n".join(lines)
     text = tidy(tiers.strip_hidden(text, user_id))      # 🎛 bağlı imkanların sətirləri görünmür
     banner = sale_banner(user_id)
     return f"{text}\n\n{banner}" if banner else text
@@ -315,7 +328,7 @@ def depo_rows() -> list:
 
 def private_keyboard(bot_username: str, user_id: int = None) -> InlineKeyboardMarkup:
     """🎛 İmkanlar və /menu → 🔘 Start düymələri ayarlarına əsasən düymələr qurulur."""
-    from common.database import is_start_button_enabled
+    from common.database import is_invite_enabled, is_start_button_enabled
 
     def vis(feature):
         try:
@@ -337,12 +350,14 @@ def private_keyboard(bot_username: str, user_id: int = None) -> InlineKeyboardMa
     if r1:
         rows.append(r1)
 
-    # 2. Metadata redaktə, Playlistlər, Premium
+    # 2. Metadata redaktə, Playlistlər, Dəvət sistemi, Premium
     extra = []
     if is_start_button_enabled("audio_edit") and vis("audio_edit"):
         extra.append(InlineKeyboardButton(text=mark("audio_edit", tr("✏️ Metadata redaktə")), callback_data="sg:edit"))
     if is_start_button_enabled("playlists") and vis("playlists"):
         extra.append(InlineKeyboardButton(text=mark("playlists", tr("🎶 Playlistlərim")), callback_data="pl:open"))
+    if is_start_button_enabled("invite") and is_invite_enabled():
+        extra.append(InlineKeyboardButton(text=tr("🎁 Dəvət et"), callback_data="sg:invite"))
     try:
         sell = bool(tiers.perks()) and not is_creator(user_id)
     except Exception:
@@ -457,7 +472,7 @@ async def start_guide(callback: CallbackQuery):
             await delete_quietly(msg)
         return
 
-    if action not in ("download", "inline", "edit", "premium", "tip"):
+    if action not in ("download", "inline", "edit", "premium", "tip", "invite"):
         await callback.answer()
         return
     if action == "edit" and not tiers.allowed("audio_edit", callback.from_user.id):
@@ -473,6 +488,9 @@ async def start_guide(callback: CallbackQuery):
                 await asyncio.to_thread(premium_keyboard, uid)
         elif action == "tip":
             text, kb = tip_text(username), tip_keyboard()
+        elif action == "invite":
+            from bot.menus.views.invites import user_invite_view
+            text, kb = await user_invite_view(callback.from_user, username, back_cb="sg:back")
         else:
             text, kb = guide_text(action, username, callback.from_user.id), guide_keyboard(action)
         await send_media(bot, chat_id, text, kb, action)
@@ -681,6 +699,11 @@ def sample_message(slot: str, first_name: str, user_id: int, bot_username: str):
         return premium_text(0, bot_username), premium_keyboard(0)
     if slot == "tip":
         return tip_text(bot_username), tip_keyboard()
+    if slot == "invite":
+        import types as pytypes
+        from bot.menus.views.invites import user_invite_data
+        user = pytypes.SimpleNamespace(id=user_id, first_name=first_name)
+        return user_invite_data(user, bot_username, back_cb="sg:back")
     return guide_text(slot, bot_username), guide_keyboard(slot)
 
 
@@ -768,13 +791,130 @@ async def start_command(message: types.Message):
     bot = context.bot
 
     if message.chat.type == "private":
+        payload = (message.text or "").split(maxsplit=1)[1:] or [""]
+        p_val = payload[0].strip().lower()
+
+        db = get_db()
+        u = await asyncio.to_thread(db.get_user, message.from_user.id) if message.from_user else None
+        now = int(time.time())
+        is_old = bool(u and (now - int(u.get("first_seen") or now) > 300))
+
+        # 🎁 Dəvət (invite / referral) linki ilə gəliş
+        if p_val.startswith("inv_") or p_val.startswith("ref_"):
+            try:
+                inviter_id = int(p_val.split("_", 1)[1])
+            except (ValueError, IndexError):
+                inviter_id = 0
+
+            if inviter_id > 0 and message.from_user and inviter_id != message.from_user.id:
+                from common.database import (
+                    get_invite_reward_days,
+                    is_invite_enabled,
+                )
+
+                if is_invite_enabled() and not is_old:
+                    reward_days = get_invite_reward_days()
+                    ok = await asyncio.to_thread(
+                        db.record_invite, message.from_user.id, inviter_id, reward_days
+                    )
+                    if ok:
+                        await asyncio.to_thread(
+                            db.grant_premium, inviter_id, reward_days, granted_by=0
+                        )
+                        with contextlib.suppress(Exception):
+                            inv_name = escape(message.from_user.first_name or "Yeni istifadəçi")
+                            await bot.send_message(
+                                inviter_id,
+                                tr(
+                                    "🎉 <b>Yeni dəvət!</b>\n\n"
+                                    "Sizin linkinizlə yeni istifadəçi ({name}) bota qoşuldu.\n"
+                                    "💎 Hesabınıza <b>+{days} gün</b> Premium əlavə olundu!",
+                                    name=inv_name,
+                                    days=reward_days,
+                                ),
+                                parse_mode="HTML",
+                            )
+                        with contextlib.suppress(Exception):
+                            await message.answer(
+                                tr("🎁 <b>Xoş gəldiniz!</b> Dəvət linki ilə qoşuldunuz."),
+                                parse_mode="HTML",
+                            )
+
+        # 🎉 Xoş gəldin (yeni istifadəçi) sınaq / kampaniya premium-u
+        if message.from_user and not message.from_user.is_bot:
+            from common.database import (
+                get_welcome_prem_days,
+                get_welcome_prem_mode,
+                get_welcome_prem_until,
+                is_welcome_prem_active,
+            )
+
+            if is_welcome_prem_active() and not is_old and not await asyncio.to_thread(db.has_welcome_trial, message.from_user.id):
+                mode = get_welcome_prem_mode()
+                trial_until = None
+                dur_text = ""
+                trial_days = None
+
+                if mode == "days":
+                    trial_days = get_welcome_prem_days()
+                    if trial_days > 0:
+                        trial_until = now + trial_days * 86400
+                        dur_text = tr("{days} gün", days=trial_days)
+                elif mode == "date":
+                    date_until = get_welcome_prem_until()
+                    if date_until and date_until > now:
+                        trial_until = date_until
+                        dur_text = fmt_date(trial_until, "%d.%m.%Y %H:%M")
+
+                if trial_until:
+                    ok = await asyncio.to_thread(
+                        db.record_welcome_trial,
+                        message.from_user.id,
+                        mode,
+                        trial_days,
+                        trial_until,
+                    )
+                    if ok:
+                        await asyncio.to_thread(
+                            db.grant_premium_until,
+                            message.from_user.id,
+                            trial_until,
+                            granted_by=0,
+                        )
+                        with contextlib.suppress(Exception):
+                            await message.answer(
+                                tr(
+                                    "🎉 <b>Xoş gəldiniz!</b>\n\n"
+                                    "Sizə yeni istifadəçi hədiyyəsi olaraq 💎 <b>Premium</b> aktivləşdirildi!\n"
+                                    "⏳ <b>Müddət:</b> {duration}\n\n"
+                                    "İstədiyiniz musiqiləri yüksək sürətlə və limitsiz dinləyə bilərsiniz. 🎧",
+                                    duration=dur_text,
+                                ),
+                                parse_mode="HTML",
+                            )
+
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(
+                    db.upsert_user,
+                    message.from_user.id,
+                    message.from_user.username,
+                    message.from_user.first_name,
+                    message.from_user.last_name,
+                )
+
+        if p_val in ("invite", "ref", "davet", "dovet", "inv"):
+            username = (await bot.me()).username
+            from bot.menus.views.invites import user_invite_view
+
+            text, kb = await user_invite_view(message.from_user, username, back_cb="sg:back")
+            await send_media(bot, message.chat.id, text, kb, "invite")
+            return
+
         # 🌐 dil hələ seçilməyibsə (yeni və ya köhnə istifadəçi) — əvvəl dil, salam seçimdən sonra o dildə
         ask = getattr(_CTX, "lang_ask_first", None)
         if ask and await ask(message):
             return
         username = (await bot.me()).username
-        payload = (message.text or "").split(maxsplit=1)[1:] or [""]
-        p_val = payload[0].strip().lower()
         if p_val == "tip":         # t.me/<bot>?start=tip (qrupa göndərilən ☕ bəxşiş mesajının düyməsi)
             await send_media(bot, message.chat.id, tip_text(username), tip_keyboard(), "tip")
             return
@@ -824,7 +964,6 @@ async def start_command(message: types.Message):
                     row = await asyncio.to_thread(audio_cache.get_cached, vid)
                 if not row:
                     try:
-                        from common.database import get_db
                         row = await asyncio.to_thread(get_db().cache_get, vid)
                     except Exception as _e:
                         logger.debug("udulan xəta [bot/plugins/start_plugin.py:738]: %r", _e)

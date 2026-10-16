@@ -51,6 +51,8 @@ rec_inp: dict[str, Any] = {"stage": None, "chat_id": None, "panel_id": None}
 REC_INP = rec_inp  # Geriyə uyğunluq üçün alias
 yta_inp: dict[str, Any] = {"stage": None, "acc": None, "chat_id": None, "panel_id": None}
 upd_inp: dict[str, Any] = {"stage": None, "chat_id": None, "panel_id": None, "back": "main"}
+inv_inp: dict[str, Any] = {"stage": None, "chat_id": None, "panel_id": None}
+wprem_inp: dict[str, Any] = {"stage": None, "chat_id": None, "panel_id": None}
 grp_inp: dict[int, Any] = {}
 
 # Mətn gözləmələri zənciri: (vəziyyət lüğəti, icazə verilən mərhələlər)
@@ -71,6 +73,8 @@ TEXT_WAITS: tuple[tuple[dict[str, Any], set[str] | None], ...] = (
     (rec_inp, None),
     (yta_inp, {"await_name"}),
     (upd_inp, {"await_sudo"}),
+    (inv_inp, {"await_invite_days"}),
+    (wprem_inp, {"await_wprem_days", "await_wprem_date"}),
 )
 
 
@@ -156,6 +160,7 @@ __all__ = [
     "delete_preview",
     "get_context",
     "grp_inp",
+    "inv_inp",
     "is_creator",
     "menu_waiting_text",
     "mt",
@@ -173,6 +178,7 @@ __all__ = [
     "upd_inp",
     "us",
     "wm",
+    "wprem_inp",
     "yt_inp",
     "yta_inp",
 ]

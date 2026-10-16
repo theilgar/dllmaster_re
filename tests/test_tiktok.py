@@ -10,13 +10,25 @@ def test_find_url():
 def test_generic_sound_detection():
     assert tt.is_generic_sound("original sound - user123", "user123")
     assert tt.is_generic_sound("оригинальный звук - Вася")
+    assert tt.is_generic_sound("ɴᴏsᴛᴀʟɢɪᴀ - оригінальний звук", "nostalgia")
+    assert tt.is_generic_sound("оригінальний звук")
+    assert tt.is_generic_sound("originalton - user")
+    assert tt.is_generic_sound("orijinal ses - user")
     assert tt.is_generic_sound("")
     assert not tt.is_generic_sound("Medcezir")
+
+
+def test_official_music_detection():
+    assert tt.is_official_music("Medcezir", "Ceza", is_original=False)
+    assert not tt.is_official_music("ɴᴏsᴛᴀʟɢɪᴀ - оригінальний звук", "ɴᴏsᴛᴀʟɢɪᴀ", is_original=True)
+    assert not tt.is_official_music("Custom Title", "Artist", is_original=True)
+    assert not tt.is_official_music("original sound", is_original=False)
 
 
 def test_info_to_query():
     assert tt.info_to_query({"track": "Med Cezir", "artist": "Ceza"}) == ("Ceza", "Med Cezir")
     assert tt.info_to_query({"track": "original sound - ali", "uploader": "ali"}) is None
+    assert tt.info_to_query({"track": "ɴᴏsᴛᴀʟɢɪᴀ - оригінальний звук", "uploader": "nostalgia"}) is None
     assert tt.info_to_query({"track": "Sevgi", "artists": ["Rəsul Gunəşli"]}) == ("Rəsul Gunəşli", "Sevgi")
 
 

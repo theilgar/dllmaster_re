@@ -20,6 +20,7 @@ from bot.menus.views.groups import user_menu_view
 from bot.menus.views.stats import fmt_until
 from common import tiers
 from common.database import get_db
+from common.i18n import _ as tr
 from common.utilities import ui_styled
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,15 @@ async def user_menu_callback(cb: CallbackQuery):
         else:
             text, kb = await user_menu_view(cb.bot, cb.from_user)
             await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        return
+
+    if act in ("invite", "ref"):
+        await cb.answer()
+        bot_uname = await get_bot_username(cb.bot)
+        from bot.menus.views.invites import user_invite_view
+
+        text, kb = await user_invite_view(cb.from_user, bot_uname)
+        await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
         return
 
     if act == "mp3_info":
@@ -459,6 +469,20 @@ async def handle_chat_users_action(cb: CallbackQuery, parts: list[str], action: 
         return True
 
     return False
+
+
+@router.callback_query(F.data.startswith("uinv:"))
+async def user_invite_callback(cb: CallbackQuery):
+    act = cb.data.split(":", 1)[1]
+    if act.startswith("refresh"):
+        back_cb = "sg:back" if ":start" in act else "umenu:home"
+        await cb.answer(tr("Yeniləndi"))
+        bot_uname = await get_bot_username(cb.bot)
+        from bot.menus.views.invites import user_invite_view
+
+        text, kb = await user_invite_view(cb.from_user, bot_uname, back_cb=back_cb)
+        with contextlib.suppress(Exception):
+            await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
 
 
 __all__ = ["handle_chat_users_action", "router"]

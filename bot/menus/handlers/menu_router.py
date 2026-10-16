@@ -30,6 +30,7 @@ from bot.menus.handlers.broadcast_flow import (
     _mcb_bc_t,
 )
 from bot.menus.handlers.group_pm_flow import handle_chat_users_action
+from bot.menus.handlers.invites_flow import handle_invite_callback
 from bot.menus.handlers.performance_flow import _mcb_perf
 from bot.menus.handlers.settings_flow import handle_settings_action
 from bot.menus.handlers.spotify_flow import _mcb_sp
@@ -492,6 +493,13 @@ async def menu_callback(cb: CallbackQuery):
 
     elif action in ("st_p", "st_ref", "st_refy"):
         await _mcb_st_p(cb, parts, action)
+
+    elif action in ("inv_cfg", "inv_toggle", "inv_days", "inv_set_days", "inv_top"):
+        await handle_invite_callback(cb, parts, action)
+
+    elif action.startswith("wprem_"):
+        from bot.menus.handlers.welcome_prem_flow import handle_welcome_prem_callback
+        await handle_welcome_prem_callback(cb, parts, action)
 
     else:
         await cb.answer()

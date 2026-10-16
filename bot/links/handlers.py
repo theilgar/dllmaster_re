@@ -31,6 +31,7 @@ from bot.links.parsers import (
     youtube_oembed,
 )
 from common.i18n import _ as tr
+from common.utilities import spawn
 
 logger = logging.getLogger(__name__)
 
@@ -237,6 +238,24 @@ def setup(context):
         badge = " 💎" if tiers.locked("playlist_import", uid) else ""
         return [[btn(tr("💾 Playlist kimi saxla") + badge, "lk:save")]]
 
+    async def has_va_in_chat(chat_id: int, chat_type: str) -> bool:
+        if chat_type not in ("group", "supergroup"):
+            return False
+        va = getattr(context, "voice_assistant", None)
+        if not va or not getattr(va, "enabled", False) or not getattr(va, "has_session", lambda: False)():
+            return False
+        if chat_id in getattr(va, "chats", {}):
+            return True
+        try:
+            if not getattr(va, "running", False):
+                with contextlib.suppress(Exception):
+                    await va.start()
+            status = await va.member_status(chat_id)
+            return status == "member"
+        except Exception as e:
+            logger.debug("has_va_in_chat check failed: %r", e)
+            return False
+
     async def show_list_card(status: types.Message, message: types.Message, label: str, name: str,
                              items: list, source: str):
         seen, clean, skipped = set(), [], 0
@@ -267,6 +286,9 @@ def setup(context):
         dlall_badge = " 💎" if (len(clean) > 1 and not tiers.allowed("dlall", uid) and tiers.visible("dlall", uid)) else ""
         dur = total_duration(clean)
         skip_line = "\n" + tr("<i>⏭ {skipped} uzun video (15 dəq.+) ötürüləcək</i>", skipped=skipped) if skipped else ""
+        chat = getattr(message, "chat", None) or status.chat
+        has_va = await has_va_in_chat(chat.id, str(getattr(chat.type, "value", chat.type)))
+        vplay_row = [[btn(tr("🎙 Canlı yayımda oxut"), "lk:vplay")]] if has_va else []
         await status.edit_text(
             f"{label}\n<b>{escape(name[:100])}</b>\n\n"
             + tr("📊 Cəmi: <b>{n}</b> mahnı · ⏳ {dur}", n=len(clean), dur=dur)
@@ -274,6 +296,7 @@ def setup(context):
             + f"\n\n{preview}{more}{note}",
             parse_mode="HTML", disable_web_page_preview=True,
             reply_markup=kb([btn(tr("⬇️ Hamısını yüklə ({n})", n=len(clean)) + dlall_badge, "lk:go")],
+                            *vplay_row,
                             *save_row(uid),
                             [btn(tr("✖️ Ləğv et"), "lk:no")]),
         )
@@ -624,8 +647,137 @@ def setup(context):
         if not p:
             await cb.answer(tr("Bu sorğu köhnəlib — linki yenidən göndər"), show_alert=True)
             return
-        if cb.from_user.id not in (p["uid"], context.creator_id):
+        is_sender = cb.from_user.id == p["uid"]
+        is_creator = cb.from_user.id == getattr(context, "creator_id", 0)
+        is_admin = False
+        if not (is_sender or is_creator) and cb.message.chat.type in ("group", "supergroup"):
+            with contextlib.suppress(Exception):
+                m = await cb.bot.get_chat_member(cb.message.chat.id, cb.from_user.id)
+                is_admin = str(getattr(m.status, "value", m.status)) in ("administrator", "creator")
+        if not (is_sender or is_creator or is_admin):
             await cb.answer(tr("⛔ Yalnız linki göndərən seçə bilər"), show_alert=True)
+            return
+
+        if action == "vplay":
+            va = getattr(context, "voice_assistant", None)
+            if not va or not getattr(va, "enabled", False) or not getattr(va, "has_session", lambda: False)():
+                await cb.answer(tr("🔴 Canlı yayım asistanı söndürülüb və ya qoşulmayıb"), show_alert=True)
+                return
+            if getattr(va, "who", "all") == "admin" and not (is_creator or is_admin):
+                await cb.answer(tr("👮 Yalnız qrup adminləri idarə edə bilər."), show_alert=True)
+                return
+            if not getattr(va, "running", False):
+                err = await va.start()
+                if err:
+                    await cb.answer(f"⚠️ Asistan işləmir: {err[:150]}", show_alert=True)
+                    return
+            items = p.get("items") or []
+            if not items:
+                await cb.answer(tr("❌ Siyahıda mahnı yoxdur"), show_alert=True)
+                return
+
+            pending.pop(key, None)
+            await cb.answer(tr("🎙 Canlı yayıma əlavə edilir..."))
+            with contextlib.suppress(Exception):
+                await cb.message.edit_text(
+                    tr("🎙 <b>{name}</b>\n<i>Canlı yayıma əlavə edilir...</i>", name=escape(p.get("name") or "")),
+                    parse_mode="HTML",
+                )
+
+            chat_id = cb.message.chat.id
+            chat_title = cb.message.chat.title or ""
+            by_user = cb.from_user.first_name or ""
+            uid = cb.from_user.id
+            source = p.get("source") or "playlist"
+
+            async def _enqueue_all():
+                try:
+                    from bot.voice.models import Track
+                    from bot.voice.engine import _VID_RE
+                    from bot.core import audio_cache
+
+                    enqueued_count = 0
+                    first_track = None
+                    remaining_tracks = []
+
+                    for idx, it in enumerate(items):
+                        url = it.get("url")
+                        raw_dur = it.get("raw_duration") or 0
+                        vid = None
+                        if url:
+                            m = _VID_RE.search(url)
+                            if m:
+                                vid = m.group(1)
+                        c = await asyncio.to_thread(audio_cache.get_cached, vid) if vid else None
+                        file_id = (c or {}).get("file_id") if c else None
+                        dur = raw_dur or ((c or {}).get("duration") or 0)
+                        title = it.get("title") or (f"{c['performer']} - {c['title']}" if c and c.get("performer") else (c or {}).get("title") or vid or "Naməlum")
+
+                        if not url and not vid:
+                            if idx == 0:
+                                t = await va.resolve(it.get("query") or it.get("title") or title, by_user)
+                                t.user_id = uid
+                                first_track = t
+                                continue
+                            else:
+                                remaining_tracks.append(it)
+                                continue
+
+                        t = Track(
+                            title=title,
+                            vid=vid,
+                            url=url or (f"https://www.youtube.com/watch?v={vid}" if vid else None),
+                            duration=dur,
+                            file_id=file_id,
+                            by=by_user,
+                            depo=bool(c),
+                            src=source,
+                            user_id=uid,
+                        )
+                        if idx == 0:
+                            first_track = t
+                        else:
+                            remaining_tracks.append(t)
+
+                    if first_track:
+                        await va.enqueue(chat_id, chat_title, first_track)
+                        enqueued_count += 1
+
+                    for it_or_t in remaining_tracks:
+                        try:
+                            if isinstance(it_or_t, Track):
+                                t = it_or_t
+                            else:
+                                t = await va.resolve(it_or_t.get("query") or it_or_t.get("title") or "Naməlum", by_user)
+                                t.user_id = uid
+                            st = va.state(chat_id, chat_title)
+                            st.queue.append(t)
+                            va.prefetch(st.queue[0])
+                            enqueued_count += 1
+                        except Exception as it_err:
+                            logger.warning(f"Playlist track əlavə edilmədi: {it_err}")
+
+                    va.save_active_sessions()
+                    st = va.chats.get(chat_id)
+                    if st:
+                        await va.refresh_np(st)
+
+                    with contextlib.suppress(Exception):
+                        await cb.message.edit_text(
+                            tr("🎙 <b>{name}</b>\n✅ <b>{n}</b> mahnı canlı yayıma əlavə edildi!",
+                               name=escape(p.get("name") or ""), n=enqueued_count),
+                            parse_mode="HTML",
+                        )
+                except Exception as e:
+                    msg = str(e)
+                    low = msg.lower()
+                    if "groupcall" in low.replace("_", "") or "no active" in low or "not in a call" in low:
+                        msg = tr("Səsli yayım başlamayıb — qrupda video chat başladın (və ya asistanı \"Manage video chats\" admini edin)")
+                    logger.warning(f"🎙 Playlist Canlı yayımda oxut xətası ({chat_id}): {e}", exc_info=True)
+                    with contextlib.suppress(Exception):
+                        await cb.message.edit_text(f"❌ <b>Xəta:</b> <code>{escape(msg[:300])}</code>", parse_mode="HTML")
+
+            spawn(_enqueue_all())
             return
 
         if action == "no":
@@ -741,5 +893,7 @@ def setup(context):
             self.message_id = mid
 
     context.links_spotify_data = spotify_data        # depo_filler_plugin üçün
+    context.links_show_list_card = show_list_card
+    context.links_callback = link_callback
     logger.info("✅ Links plugin yükləndi (YouTube + Spotify + VK)")
 

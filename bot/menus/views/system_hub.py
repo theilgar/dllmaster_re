@@ -444,9 +444,27 @@ def biz_view(note: str = "") -> tuple[str, InlineKeyboardMarkup]:
     text = biz_overview_text(ctx)
     if note:
         text += f"\n\nℹ️ {note}"
-    from common.database import is_tip_prompt_enabled
+    from common.database import (
+        get_invite_reward_days,
+        get_welcome_prem_days,
+        get_welcome_prem_mode,
+        get_welcome_prem_until,
+        is_invite_enabled,
+        is_tip_prompt_enabled,
+        is_welcome_prem_active,
+    )
+    from common.formatting import fmt_date
 
     t_on = is_tip_prompt_enabled()
+    inv_on = is_invite_enabled()
+    inv_days = get_invite_reward_days()
+    wprem_on = is_welcome_prem_active()
+    wprem_mode = get_welcome_prem_mode()
+    if wprem_mode == "days":
+        wprem_sub = f"{get_welcome_prem_days()} gün"
+    else:
+        u_ts = get_welcome_prem_until()
+        wprem_sub = fmt_date(u_ts, "%d.%m") if u_ts else "tarixsiz"
     tl = (getattr(ctx, "tiers_label", None) or (lambda: "🎛 İmkanlar və limitlər"))()
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -456,6 +474,8 @@ def biz_view(note: str = "") -> tuple[str, InlineKeyboardMarkup]:
                 InlineKeyboardButton(text=tl, callback_data="tf:panel"),
                 panel.toggle("☕ Bəxşiş", t_on, "menu:toggle_tip", compact=True),
             ],
+            [_btn(f"🎁 Dəvət sistemi ({'🟢' if inv_on else '🔴'} {inv_days} gün)", "inv_cfg")],
+            [_btn(f"🎉 Xoş gəldin paketi ({'🟢' if wprem_on else '🔴'} {wprem_sub})", "wprem_cfg")],
             nav_row("main"),
         ]
     )
