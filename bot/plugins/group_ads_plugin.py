@@ -32,11 +32,6 @@ DIALOGS_TIMEOUT = 90
 FLOOD_RETRY_MAX = 90                                   # bu qədər saniyəyə qədər FloodWait gözlənilir
 
 
-def _err(name: str):
-    from telethon import errors
-    return getattr(errors, name, None)
-
-
 def classify(exc: Exception) -> str:
     """Telethon xətası → "flood" | "peerflood" | "skip:<səbəb>" | "fail"."""
     n = type(exc).__name__

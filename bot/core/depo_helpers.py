@@ -26,7 +26,10 @@ Rejim (/depo → 🤖 Köməkçi botlar):
 config.env:
   DEPO_HELPER_TOKENS=123:AAA...,456:BBB...   # və ya /depo helper add <token>
   DEPO_SINK_CHATS=<creator_id>,<başqa_id>     # file_id çevirmə çatları (botu /start etmiş şəxslər)
-  DEPO_SINK_INTERVAL=1.0                      # bir sink çatına forward-lar arası (san.)
+  DEPO_SINK_INTERVAL=1.0                      # bir sink çatına forward-lar arası (san.) — 🤖 avtonun başlanğıcı
+
+🎛 Sürət / aralıq / gözləmə ayarlarının hər biri 🤖 Avto (flood-a görə özü tənzimlənir) və ya ✋ Manual:
+  bot/core/depo_tuning.py · menyu: /depo → 🤖 Köməkçi botlar → 🎛 Tənzimləmələr.
 
 👋 Köməkçi botlara kimsə yazsa (/start və s.) — "bu köməkçi botdur" + əsas botun linki göndərilir.
   Bunun üçün köməkçilər ayrıca, yüngül polling ilə dinlənir (yalnız şəxsi mesajlar).
@@ -60,6 +63,8 @@ from aiogram.client.session.middlewares.base import BaseRequestMiddleware
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.methods import SendAudio
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Message
+from bot.core import depo_shards
+from bot.core.depo_tuning import TuningMixin
 from common.database import Settings
 from common.utilities import spawn
 
@@ -71,12 +76,10 @@ UPLOAD_CTX = contextvars.ContextVar("depo_upload_ctx", default=None)
 SCOPES = {"off": "🔴 Söndürülüb", "filler": "📦 Yalnız doldurucu", "all": "🌐 Bütün depo yükləmələri"}   # sıra = düymənin dövrü
 DEFAULT_SCOPE = "all"        # köməkçilər varsa İSTİFADƏÇİ yükləmələri də onlarla depoya gedir — əsas bot sərbəst
 MAIN_FLOOD_ROUTE = True      # "filler" rejimində də: əsas bot depoda flood-dadırsa yükləmə köməkçilərə keçir
-DEFAULT_RATE = 18                 # hər köməkçi — dəqiqədə neçə mahnı (Telegram limiti ~20)
-RATE_STEPS = [6, 10, 12, 15, 18, 20, 25, 30]
-S_TOKENS, S_SCOPE, S_RATE = "depo_helpers:tokens", "depo_helpers:scope", "depo_helpers:rate"
+S_TOKENS, S_SCOPE = "depo_helpers:tokens", "depo_helpers:scope"
+S_COOL = "depo_helpers:cool_chat"          # {bot_id: {chat_id: epoch}} — restartdan sonra kvotası dolmuş botlar boş yerə yoxlanmasın
 S_CONV = "depo_helpers:conv"
 S_GROUPS = "depo_helpers:groups"          # {chat_id: [köməkçi bot id, ...]} — qruplarda göndərmə
-GROUP_INTERVAL = 3.2                      # bir bot bir qrupa — mesajlar arası (≈ 18/dəq.)
 NOTIFY_EVERY = 6 * 3600                   # eyni köməkçi üçün "depoya əlavə et" xatırlatması
 FLOOD_ASK_EVERY = 30 * 60                 # qrup flood-a düşəndə "köməkçi lazımdır?" — ən çox bu qədərdən bir
 S_FLOOD_MUTE = "depo_helpers:flood_mute"  # bu qruplarda soruşulmasın
@@ -86,9 +89,7 @@ S_EXT_AUTO = "depo_helpers:ext_auto"        # kənar qrupa qoşulduqda avtomatik
 CONV_MODES = {"lazy": "🐢 Lazy — yalnız istənəndə", "eager": "⚡ Dərhal — yükləmə anında"}
 INLINE_BUDGET = 2.5               # inline cavab üçün çevirməyə ayrılan vaxt (san.)
 SEND_BUDGET = 30.0                # adi göndərmə üçün
-# ⚡ eager: sink növbəsi bundan uzundursa (flood / çox işçi) mahnı gözləmədən lazy yolla qeyd olunur
-SINK_MAX_WAIT = float(os.getenv("DEPO_SINK_MAX_WAIT") or 20.0)
-WARM_INTERVAL = float(os.getenv("DEPO_WARM_INTERVAL") or 3.0)   # fon çevirici: hər N san. bir mahnı
+# sürət / qrup aralığı / sink aralığı və gözləməsi / fon çevirici / sorğu: bot/core/depo_tuning.py (🤖 Avto · ✋ Manual)
 # file_id daşıya bilən sorğular (music_plugin-in istifadə etdikləri + ehtiyat)
 FID_METHODS = {"SendAudio", "SendDocument", "SendMediaGroup", "AnswerInlineQuery", "EditMessageMedia",
                "SendVoice", "AnswerWebAppQuery", "SavePreparedInlineMessage",
@@ -112,7 +113,8 @@ class Helper:
         self.ok = False
         self.status = "yoxlanılır..."
         self.next_at = 0.0                # tempə görə növbəti boş an (monotonic)
-        self.cool_until = 0.0             # flood (RetryAfter) bitənə qədər
+        self.cool_until = 0.0             # şəbəkə xətası və s. — köməkçi hər yerdə kənardadır (monotonic)
+        self.cool_chat = {}               # chat_id → bu bot BU kanalda flood-dadır (Telegram kvotası bot × kanal başınadır)
         self.sent = 0
         self.floods = 0
         self.fails = 0
@@ -120,6 +122,7 @@ class Helper:
         self.g_next = {}                  # chat_id → növbəti boş an (qrup tempi)
         self.g_cool = {}                  # chat_id → flood bitənə qədər
         self.g_sent = 0
+        self.shard_state = {}             # əlavə depo kanalı (shard) → "ok" (admin) | "bad" — depo_shards
 
     @property
     def name(self) -> str:
@@ -128,7 +131,7 @@ class Helper:
         return f"bot{self.token.split(':', 1)[0]}"
 
 
-class HelperPool:
+class HelperPool(TuningMixin):
     def __init__(self, context):
         self.ctx = context
         self.helpers = []
@@ -156,6 +159,9 @@ class HelperPool:
         self._g_lock = asyncio.Lock()
         self._notified = {}               # bot id → son "depoya əlavə et" mesajı
         self.gstats = {"helper": 0, "main": 0, "fallback": 0}
+        self._tune_init()
+        depo_shards.capacity_fn = self.shard_capacity
+        depo_shards.exhausted_fn = self.chat_exhausted
         self._init_table()
 
     # ── ayarlar ──
@@ -174,27 +180,11 @@ class HelperPool:
 
     @property
     def rate(self) -> int:
-        try:
-            return max(1, min(60, int(self._get(S_RATE, DEFAULT_RATE))))
-        except (TypeError, ValueError):
-            return DEFAULT_RATE
-
-    def step_rate(self, direction: int) -> int:
-        cur = self.rate
-        if direction > 0:
-            nxt = next((x for x in RATE_STEPS if x > cur), RATE_STEPS[-1])
-        else:
-            nxt = next((x for x in reversed(RATE_STEPS) if x < cur), RATE_STEPS[0])
-        self._set(S_RATE, str(nxt))
-        return nxt
+        """Hər köməkçi — dəqiqədə neçə mahnı (🤖 avto: flood-a görə; ✋ manual: yazılan)."""
+        return int(self.tune("rate"))
 
     def set_rate(self, val: int) -> int:
-        v = max(1, min(60, int(val)))
-        self._set(S_RATE, str(v))
-        return v
-
-    def step_rate_delta(self, delta: int) -> int:
-        return self.set_rate(self.rate + delta)
+        return int(self.set_tune("rate", val))
 
     @property
     def conv_mode(self) -> str:
@@ -349,20 +339,196 @@ class HelperPool:
             ids = [int(self.ctx.creator_id)]
         return ids
 
+    def sink_interval(self) -> float:
+        return float(self.tune("sink_interval"))
+
+    # ── 🌊 kvota + 🧩 əlavə kanallar (bot/core/depo_shards.py) ──
+    # Telegram HƏR BOTA HƏR KANAL üçün ayrıca saatlıq kvota verir (köhnə log: 48 botun flood-u 00:08–00:36 arası tədricən
+    # gəldi, yükləmə isə 150–200/dəq. davam etdi; hamı dolanda dayandı). Ona görə flood alan bot yalnız BU kanal üçün
+    # kənarlaşdırılır; kanalda bütün köməkçilər dolanda kanal dayanır və yükləmə digər kanala keçir.
     @staticmethod
-    def sink_interval() -> float:
+    def _chat_of(method):
         try:
-            return max(0.2, float(os.getenv("DEPO_SINK_INTERVAL") or 1.0))
-        except ValueError:
-            return 1.0
+            return int(getattr(method, "chat_id", None))
+        except (TypeError, ValueError):
+            return None
+
+    def channel_cool_left(self, chat_id=None) -> float:
+        """Kanalın dayanmasından qalan vaxt (san.); chat_id verilməyibsə — əsas depo."""
+        chat_id = chat_id if chat_id is not None else self._depo["id"]
+        return depo_shards.left(chat_id) if chat_id is not None else 0.0
+
+    def chat_exhausted(self, chat_id) -> bool:
+        """Bu kanalda yararlı köməkçilərin HAMISI flood-dadırsa (10 san.-dən çox) — kanal doludur."""
+        if chat_id is None:
+            return False
+        now = time.monotonic()
+        cands = [h for h in self.active() if self._usable(h, chat_id)]
+        return bool(cands) and all(h.cool_chat.get(chat_id, 0.0) > now + 10 for h in cands)
+
+    def note_channel_flood(self, wait: float, who: str = "", chat_id=None):
+        """Kanalı `wait` saniyə dayandırır (yalnız bütün köməkçilər dolanda çağırılır)."""
+        chat_id = chat_id if chat_id is not None else self._depo["id"]
+        if chat_id is None or not depo_shards.pause(chat_id, wait):
+            return                                            # artıq qeyd olunub
+        self.stats["channel_flood"] = self.stats.get("channel_flood", 0) + 1
+        alt = depo_shards.alternative(chat_id)
+        logger.warning(f"🌊 Depo kanalı doldu ({chat_id}): bütün köməkçilər limitdədir, ən tezi {wait:.0f} san.-dən sonra — "
+                       + (f"yükləmə {alt[0]} kanalına keçir" if alt else "başqa kanal yoxdur, gözlənilir")
+                       + (f" ({who})" if who else ""))
+
+    def note_helper_flood(self, h, chat_id, wait: float, long: bool):
+        """Bir köməkçi bu kanalda flood aldı → yalnız o bot bu kanal üçün kənarlaşdırılır."""
+        until = time.monotonic() + wait + 1
+        if chat_id is None:
+            h.cool_until = max(h.cool_until, until)
+            return
+        h.cool_chat[chat_id] = until
+        if long:
+            self.stats["quota"] = self.stats.get("quota", 0) + 1
+            logger.info(f"🤖 {h.name}: {chat_id} kanalında kvota doldu ({wait:.0f} san.) — bu kanal üçün kənarlaşdırıldı")
+            if self.chat_exhausted(chat_id):
+                soonest = min(h2.cool_chat.get(chat_id, 0.0) for h2 in self.active() if self._usable(h2, chat_id)) \
+                    - time.monotonic()
+                self.note_channel_flood(max(soonest, 1.0), h.name, chat_id)
+            self._save_cool()
+        else:
+            self.note_flood("rate")
+            logger.info(f"🤖 {h.name}: flood {wait:.0f} san. — digər köməkçiyə keçilir")
+
+    def clear_channel_cool(self):
+        """🩺 "Hamısını yoxla" — dayanmaları və botların kanal fasilələrini ləğv edib yenidən sınayır."""
+        depo_shards.clear()
+        for h in self.helpers:
+            h.cool_chat.clear()
+        self._save_cool(force=True)
+
+    # kvotası dolmuş (bot, kanal) cütləri restartdan sonra da qalsın
+    def _save_cool(self, force: bool = False):
+        now_m, now_t = time.monotonic(), time.time()
+        if not force and now_m - getattr(self, "_cool_saved", -99.0) < 15:
+            return
+        self._cool_saved = now_m
+        data = {str(h.me.id): {str(c): now_t + (u - now_m) for c, u in h.cool_chat.items() if u > now_m}
+                for h in self.helpers if h.me and any(u > now_m for u in h.cool_chat.values())}
+        self._set(S_COOL, json.dumps(data))
+
+    def _load_cool(self):
+        try:
+            data = json.loads(self._get(S_COOL) or "{}")
+        except (ValueError, TypeError):
+            return
+        now_m, now_t = time.monotonic(), time.time()
+        for h in self.helpers:
+            for c, until in ((data.get(str(h.me.id)) if h.me else None) or {}).items():
+                if float(until) > now_t:
+                    h.cool_chat[int(c)] = now_m + float(until) - now_t
+
+    def _reroute(self, method):
+        """Hədəf kanal dayanıbsa və ya orada bütün köməkçilər dolubsa, başqa kanal varsa — sorğu ona yönəldilir."""
+        chat = self._chat_of(method)
+        if chat is None or (depo_shards.left(chat) <= 10 and not self.chat_exhausted(chat)):
+            return method, chat
+        alt = depo_shards.alternative(chat)
+        if not alt:
+            return method, chat
+        self.stats["rerouted"] = self.stats.get("rerouted", 0) + 1
+        return method.model_copy(update={"chat_id": alt[0], "message_thread_id": alt[1]}), alt[0]
+
+    async def _wait_slot(self, wait: float, chat) -> bool:
+        """Növbəni gözləyir; kanal flood-dadırsa hər 15 san.-dən bir başqa kanalın açılıb-açılmadığına baxır
+        (uzun flood zamanı yeni kanal / köməkçi qoşulsa gözləyən işçilər oyansın). → True: kanal dəyişməlidir."""
+        while wait > 0:
+            step = min(wait, 15.0)
+            await asyncio.sleep(step)
+            wait -= step
+            if (wait > 0 and chat is not None and (depo_shards.left(chat) > 10 or self.chat_exhausted(chat))
+                    and depo_shards.alternative(chat)):
+                return True
+        return False
+
+    # 🧩 əlavə kanalda hansı köməkçi admin-dir
+    def shard_capacity(self, chat_id) -> int:
+        if not depo_shards.is_shard(chat_id) or self.scope == "off" or not self.active():
+            return len(self.active()) or 1
+        return sum(1 for h in self.active() if h.shard_state.get(chat_id) == "ok")
+
+    def _usable(self, h, chat_id) -> bool:
+        return chat_id is None or not depo_shards.is_shard(chat_id) or h.shard_state.get(chat_id) == "ok"
+
+    async def _is_chat_admin(self, h, chat_id) -> bool:
+        try:
+            cm = await h.bot.get_chat_member(chat_id, h.me.id)
+        except Exception:
+            return False
+        st = getattr(getattr(cm, "status", ""), "value", getattr(cm, "status", ""))
+        return st == "creator" or (st == "administrator" and getattr(cm, "can_post_messages", True) is not False)
+
+    async def verify_main(self, chat_id) -> bool:
+        """Əsas bot əlavə kanalda admin-dirmi (çevirmə, ehtiyat yükləmə və kanalın silinməsi ona bağlıdır)."""
+        ok = False
+        try:
+            cm = await self.ctx.bot.get_chat_member(chat_id, self.ctx.bot.id)
+            st = getattr(getattr(cm, "status", ""), "value", getattr(cm, "status", ""))
+            ok = st == "creator" or (st == "administrator" and getattr(cm, "can_post_messages", True) is not False)
+        except Exception as e:
+            logger.debug(f"🧩 əsas bot {chat_id} kanalında yoxlanmadı: {e}")
+        depo_shards.set_main_ok(chat_id, ok)
+        return ok
+
+    async def verify_shard(self, chat_id) -> tuple:
+        """Hər köməkçinin həmin kanalda admin olub-olmadığını yoxlayır → (hazır, cəmi)."""
+        helpers = [h for h in self.helpers if h.me and h.bot]
+        oks = await asyncio.gather(*(self._is_chat_admin(h, chat_id) for h in helpers))
+        for h, ok in zip(helpers, oks):
+            h.shard_state[chat_id] = "ok" if ok else "bad"
+        return sum(oks), len(helpers)
+
+    async def shard_add_helpers(self, chat_ref, limit: int = 0, pause: float = 1.5, progress=None) -> dict:
+        """🤖 Userbot ilə köməkçiləri kanala admin kimi əlavə edir (yalnız artıq admin olmayanları) → statistika."""
+        cid = await depo_shards.resolve(self.ctx.bot, chat_ref)
+        res = {"added": 0, "already": 0, "failed": 0, "errors": [], "id": cid}
+        if cid is None:
+            res["errors"].append("kanal tapılmadı")
+            return res
+        await self.verify_shard(cid)
+        todo = [h for h in self.helpers if h.me and h.bot]
+        todo = [h for h in todo if h.shard_state.get(cid) != "ok"] or []
+        res["already"] = len([h for h in self.helpers if h.shard_state.get(cid) == "ok"])
+        if limit:
+            todo = todo[:max(0, limit - res["already"])]
+        for n, h in enumerate(todo, 1):
+            out = await self.userbot_add(h, chat_ref, admin=True)
+            if out.startswith("✅"):
+                res["added"] += 1
+                h.shard_state[cid] = "ok"
+            else:
+                res["failed"] += 1
+                res["errors"].append(f"{h.name}: {out}")
+                if "FloodWait" in out or "flood" in out.lower():
+                    break
+            if progress:
+                await progress(n, len(todo), res)
+            await asyncio.sleep(pause)
+        await self.verify_shard(cid)
+        return res
+
+    def shard_report(self) -> list:
+        return depo_shards.report()
 
     # ── vəziyyət ──
     def active(self) -> list:
         return [h for h in self.helpers if h.ok]
 
-    def flooded(self) -> int:
+    @staticmethod
+    def cool_left(h, chat_id=None) -> float:
+        """Köməkçinin gözləməsi (san.): kanal verilibsə — həmin kanal üçün, yoxsa ən uzunu."""
         now = time.monotonic()
-        return sum(1 for h in self.active() if h.cool_until > now)
+        chats = h.cool_chat.get(chat_id, 0.0) if chat_id is not None else max(h.cool_chat.values(), default=0.0)
+        return max(0.0, h.cool_until - now, chats - now)
+
+    def flooded(self) -> int:
+        return sum(1 for h in self.active() if self.cool_left(h) > 0)
 
     def capacity(self) -> int:
         """Nəzəri sürət (mahnı/dəq.) — köməkçilər və sink çevirmə limitindən kiçiyi."""
@@ -419,7 +585,7 @@ class HelperPool:
         depo = await self.depo_id(bot)
         if depo is None:
             return False
-        if str(chat_id) == str(depo):
+        if str(chat_id) == str(depo) or depo_shards.is_shard(chat_id):
             return True
         try:
             from bot.core import audio_cache
@@ -439,8 +605,10 @@ class HelperPool:
             logger.info(f"🤖 Köməkçi botlar: {len(self.active())}/{len(self.helpers)} hazır "
                         f"({', '.join(h.name + ('✅' if h.ok else '❌') for h in self.helpers)})")
             await self.start_polling()
+            self._load_cool()
             spawn(self.notify_missing())
             spawn(self.warm_groups())
+            spawn(self.verify_all_shards())
         self.start_warm()
 
     # ── 👋 köməkçiyə yazana əsas botun linki ──
@@ -460,8 +628,8 @@ class HelperPool:
     # Əvvəl: 24 köməkçinin HƏR BİRİ üçün ayrıca long-polling (aiogram Dispatcher) — 24 daimi bağlantı;
     # Telegram-da qısa nasazlıq olanda (502 Bad Gateway) hamısı eyni anda təkrar yoxlayıb GetUpdates
     # flood-una düşür, loga yüzlərlə ERROR tökülürdü. İndi: TƏK yüngül dövrə — köməkçilər növbə ilə,
-    # POLL_EVERY saniyədən bir qısa sorğu (timeout=0); xətalar səssiz, nasazlıqda fasilə uzanır.
-    POLL_EVERY = 45
+    # poll_every saniyədən bir qısa sorğu (timeout=0); xətalar səssiz, nasazlıqda fasilə uzanır.
+    # (aralıq: 🎛 poll_every — 🤖 avto / ✋ manual)
 
     async def start_polling(self):
         if not [h for h in self.helpers if h.bot and h.me]:
@@ -472,7 +640,7 @@ class HelperPool:
                     await h.bot.delete_webhook(drop_pending_updates=True)
         self._poll_dp = None
         self._poll_task = asyncio.create_task(self._poll_loop())
-        logger.info(f"👋 Köməkçi botlar dinlənilir ({len(self.helpers)}, hər {self.POLL_EVERY} san.) — "
+        logger.info(f"👋 Köməkçi botlar dinlənilir ({len(self.helpers)}, hər {self.tune("poll_every"):g} san.) — "
                     "yazanlara əsas botun linki göndərilir")
 
     async def _poll_loop(self):
@@ -486,6 +654,7 @@ class HelperPool:
                     ups = await h.bot.get_updates(offset=offsets.get(h.me.id), timeout=0, limit=50,
                                                   allowed_updates=["message"], request_timeout=15)
                 except TelegramRetryAfter as e:
+                    self.note_flood("poll_every")
                     await asyncio.sleep(min(e.retry_after, 30))
                     continue
                 except Exception:
@@ -500,7 +669,7 @@ class HelperPool:
             fails = fails + 1 if bad > len(self.helpers) // 2 else 0
             if fails == 3:
                 logger.info("👋 Telegram köməkçi sorğularına cavab vermir (502 / timeout) — fasilə uzadıldı")
-            await asyncio.sleep(self.POLL_EVERY * (4 if fails >= 3 else 1))
+            await asyncio.sleep(self.tune("poll_every") * (4 if fails >= 3 else 1))
 
     async def _redirect(self, bot, message):
         key = (bot.id, message.from_user.id if message.from_user else 0)
@@ -574,9 +743,18 @@ class HelperPool:
         except Exception as e:
             h.status = f"❌ {type(e).__name__}: {str(e)[:80]}"
 
+    async def verify_all_shards(self):
+        """🧩 Əlavə kanalları tapır və hər köməkçinin orada admin olub-olmadığını yoxlayır."""
+        for e in depo_shards.extras():
+            cid = await depo_shards.resolve(self.ctx.bot, e["ref"])
+            if cid:
+                await self.verify_main(cid)
+                await self.verify_shard(cid)
+
     async def recheck(self):
         self._depo["ts"] = 0
         await asyncio.gather(*(self._check(h) for h in self.helpers), return_exceptions=True)
+        await self.verify_all_shards()
         for h in self.helpers:
             h.groups.clear()
 
@@ -674,6 +852,7 @@ class HelperPool:
 
     def on_group_flood(self, chat_id, wait: float):
         """Middleware çağırır (sinxron) — sual flood bitəndən sonra göndərilir."""
+        self.note_flood("group_interval")
         if not self.ext_enabled:
             return
         if not hasattr(self, "_flood_ask"):
@@ -929,6 +1108,7 @@ class HelperPool:
         if not helpers or not post:
             return await make_request(bot, method)
         for _ in range(len(helpers) + 2):
+            gap = self.tune("group_interval")
             async with self._g_lock:
                 now = time.monotonic()
                 cands = [("main", max(self._main_g.get(chat, 0), 0))] + \
@@ -936,9 +1116,9 @@ class HelperPool:
                 who, at = min(cands, key=lambda c: c[1])
                 start = max(now, at)
                 if who == "main":
-                    self._main_g[chat] = start + GROUP_INTERVAL
+                    self._main_g[chat] = start + gap
                 else:
-                    who.g_next[chat] = start + GROUP_INTERVAL
+                    who.g_next[chat] = start + gap
             if start > now:
                 await asyncio.sleep(start - now)
             if who == "main":
@@ -946,6 +1126,7 @@ class HelperPool:
                 try:
                     return await make_request(bot, method)
                 except TelegramRetryAfter as e:
+                    self.note_flood("group_interval")
                     self._main_g[chat] = time.monotonic() + e.retry_after + 1
                     if not helpers:
                         raise
@@ -967,6 +1148,7 @@ class HelperPool:
                     "from": {"id": who.me.id, "is_bot": True, "first_name": who.me.first_name or "bot"},
                 }).as_(bot)
             except TelegramRetryAfter as e:
+                self.note_flood("group_interval")
                 who.g_cool[chat] = time.monotonic() + e.retry_after + 1
                 logger.info(f"🤖 {who.name} qrupda flood {e.retry_after} san. — digərinə keçilir")
                 continue
@@ -1005,17 +1187,26 @@ class HelperPool:
         self.helpers = []
 
     # ── yükləmə ──
-    async def _reserve(self):
+    async def _reserve(self, chat_id=None):
         """Ən tez boşalan köməkçini seçir (flood alanlar cooldown-larına görə avtomatik arxaya düşür)
-        və ona yer ayırır → (helper, gözləmə san.)"""
+        və ona yer ayırır → (helper, gözləmə san.). chat_id — hədəf kanal: onda admin olmayan köməkçilər keçilir,
+        kanalın flood dayanması başa çatmamış yer verilmir."""
         interval = 60.0 / self.rate
         async with self.lock:
             now = time.monotonic()
-            cands = self.active()
+            cands = [h for h in self.active() if self._usable(h, chat_id)]
             if not cands:
                 return None, 0.0
-            h = min(cands, key=lambda x: max(x.next_at, x.cool_until))
-            start = max(now, h.next_at, h.cool_until)
+            floor = depo_shards.left(chat_id) if chat_id is not None else 0.0
+
+            def free_at(x):
+                return max(x.next_at, x.cool_until, x.cool_chat.get(chat_id, 0.0))
+            h = min(cands, key=free_at)
+            start = max(now, free_at(h), now + floor)
+            rate = self.tune("chat_rate")
+            if rate and chat_id is not None and UPLOAD_CTX.get() is not None:
+                # ✋ istəyə bağlı: kanala ümumi sürət (standart söndürülüb); istifadəçi yükləməsi növbəyə girmir
+                start = depo_shards.chat_slot(chat_id, rate, start)
             h.next_at = start + interval
             return h, start - now
 
@@ -1030,28 +1221,39 @@ class HelperPool:
                 logger.debug("udulan xəta [bot/core/depo_helpers.py:1028]: %r", _e)
 
     async def upload(self, method, bot, make_request):
+        method, chat = self._reroute(method)
+        if UPLOAD_CTX.get() is None and chat is not None and depo_shards.left(chat) > 10:
+            # istifadəçi yükləməsi kanal flood-unu gözləməsin (doldurucu gözləyə bilər, istifadəçi yox)
+            self.stats["fallback"] += 1
+            return await make_request(bot, method)
+        long_flood = self.tune("long_flood")
         attempts = max(2, len(self.active()) * 2)
         for _ in range(attempts):
-            h, wait = await self._reserve()
+            method, chat = self._reroute(method)              # kanal flood-a düşübsə — digərinə
+            h, wait = await self._reserve(chat)
             if h is None:
                 break
             if wait > 0:
                 self._phase("SLOT")
-                await asyncio.sleep(wait)
+                if await self._wait_slot(wait, chat):
+                    continue                                   # gözləyərkən başqa kanal açıldı → ona keç
             self._phase("UP")
             try:
                 msg = await h.bot(method)
             except TelegramRetryAfter as e:
-                h.cool_until = time.monotonic() + e.retry_after + 1
                 h.floods += 1
-                logger.info(f"🤖 {h.name}: flood {e.retry_after} san. — digər köməkçiyə keçilir")
+                self.note_helper_flood(h, chat, e.retry_after, long=e.retry_after > long_flood)
                 continue
             except (TelegramForbiddenError, TelegramBadRequest) as e:
                 err = str(e).lower()
                 if isinstance(e, TelegramForbiddenError) or any(x in err for x in _DEAD_ERRORS):
-                    h.ok = False
-                    h.status = f"⚠️ {str(e)[:80]}"
-                    logger.warning(f"🤖 {h.name} söndürüldü: {e}")
+                    if chat is not None and depo_shards.is_shard(chat):
+                        h.shard_state[chat] = "bad"             # yalnız bu əlavə kanalda yararsızdır, əsas depoda işləyir
+                        logger.warning(f"🤖 {h.name} {chat} kanalında istifadə olunmur: {e}")
+                    else:
+                        h.ok = False
+                        h.status = f"⚠️ {str(e)[:80]}"
+                        logger.warning(f"🤖 {h.name} söndürüldü: {e}")
                     continue
                 raise                                  # faylın özü ilə bağlı xəta — əsas bot da alacaqdı
             except Exception as e:
@@ -1060,8 +1262,10 @@ class HelperPool:
                 h.cool_until = time.monotonic() + 15        # şəbəkə xətası — qısa fasilə, digərləri işləsin
                 continue
             h.sent += 1
+            if chat is not None:
+                depo_shards.note_sent(chat)
             sink_wait = self.sink_backlog()
-            if self.conv_mode == "eager" and getattr(msg, "audio", None) and sink_wait > SINK_MAX_WAIT:
+            if self.conv_mode == "eager" and getattr(msg, "audio", None) and sink_wait > self.tune("sink_max_wait"):
                 # sink çatı flood-dadır və ya növbə uzundur — işçini bloklamırıq, lazy kimi qeyd edirik
                 self.stats["sink_skip"] = self.stats.get("sink_skip", 0) + 1
                 if self.stats["sink_skip"] % 50 == 1:
@@ -1114,7 +1318,7 @@ class HelperPool:
         fwd = None
         for _ in range(4):
             chat, wait = await self._sink_slot()
-            if wait > SINK_MAX_WAIT:
+            if wait > self.tune("sink_max_wait"):
                 raise RuntimeError(f"sink çatı flood-dadır ({wait:.0f} san. gözləmə)")
             if wait > 0:
                 self._phase("FWD")                     # monitorda "UP" yox, sink gözləməsi görünsün
@@ -1125,9 +1329,10 @@ class HelperPool:
                 break
             except TelegramRetryAfter as e:
                 logger.warning(f"🤖 sink çatı {chat}: flood {e.retry_after} san.")
+                self.note_flood("sink_interval")
                 async with self._sink_lock:
                     self._sinks[chat] = time.monotonic() + e.retry_after + 1
-                if e.retry_after > SINK_MAX_WAIT:
+                if e.retry_after > self.tune("sink_max_wait"):
                     raise RuntimeError(f"sink çatı flood-dadır ({e.retry_after} san.)")
         if fwd is None:
             raise RuntimeError("sink çatına forward alınmadı (flood)")
@@ -1319,8 +1524,9 @@ class HelperPool:
 
     async def warm_loop(self):
         while True:
-            await asyncio.sleep(WARM_INTERVAL)
-            if self.conv_mode != "lazy" or not self.foreign or WARM_INTERVAL <= 0:
+            iv = self.tune("warm_interval")
+            await asyncio.sleep(iv if iv > 0 else 10)             # 0 — söndürülüb (menyudan açıla bilər)
+            if self.conv_mode != "lazy" or not self.foreign or iv <= 0:
                 continue
             try:
                 fid = await asyncio.to_thread(self._next_warm)
@@ -1336,7 +1542,7 @@ class HelperPool:
                 logger.debug(f"Fon çevirici: {e}")
 
     def start_warm(self):
-        if WARM_INTERVAL > 0 and not (self._warm_task and not self._warm_task.done()):
+        if not (self._warm_task and not self._warm_task.done()):
             self._warm_task = asyncio.create_task(self.warm_loop())
 
     @staticmethod

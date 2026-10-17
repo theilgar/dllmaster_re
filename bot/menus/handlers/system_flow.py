@@ -289,6 +289,22 @@ async def handle_system_action(cb: CallbackQuery, parts: list[str], action: str)
         await safe_edit_cb(cb, *storage_view(note=note))
         return True
 
+    if action == "storage_clean_records":
+        from common.diagnostics import project_storage_snapshot
+        from common.menu import storage_view
+        from common.utilities import cleanup_records, format_bytes
+
+        freed_bytes, freed_files = await cleanup_records()
+        project_storage_snapshot(force=True)
+        note = (
+            f"🎙 <b>Səs qeydləri təmizləndi:</b> {freed_files} fayl ({format_bytes(freed_bytes)} boşaldıldı)"
+            if freed_files
+            else "ℹ️ <i>Silinəcək səs qeydi tapılmadı (0 bayt)</i>"
+        )
+        await cb.answer("🎙 Qeydlər təmizləndi!" if freed_files else "Qeyd tapılmadı", show_alert=True)
+        await safe_edit_cb(cb, *storage_view(note=note))
+        return True
+
     if action == "dev":
         await cb.answer()
         await safe_edit_cb(cb, *dev_hub_view(await git_summary()))

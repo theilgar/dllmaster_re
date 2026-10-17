@@ -656,6 +656,139 @@ def reopen_server_login(acc_id: str):
     LAST_TEST.pop(acc_id, None)
 
 
+# ───────────────────────── 🔘 hesabın düymələri (brauzerdə aç) ─────────────────────────
+# Hər brauzer-profilli hesabın səhifəsində sahibin adlandırdığı düymələr: basanda həmin hesabın Chrome profili serverin
+# ekranında açılır (məs. YouTube / Gmail — hesabın poçtuna baxmaq üçün). Link siyahısı hesabda saxlanır (`links`).
+LINK_PRESETS = {
+    "yt": ("▶️ YouTube", "https://www.youtube.com/"),
+    "gm": ("📧 Gmail", "https://mail.google.com/"),
+    "ga": ("👤 Google hesabı", "https://myaccount.google.com/"),
+    "ym": ("🎵 YT Music", "https://music.youtube.com/"),
+}
+DEFAULT_LINKS = [{"name": LINK_PRESETS["yt"][0], "url": LINK_PRESETS["yt"][1]}]   # ayrıca saxlanmayıbsa
+MAX_LINKS = 6
+EXE_NAMES = {   # webprofile brauzer açarı → serverdə icra faylı (sıra ilə)
+    "chrome": ("google-chrome-stable", "google-chrome"), "chromium": ("chromium", "chromium-browser"),
+    "brave": ("brave", "brave-browser"), "edge": ("microsoft-edge-stable", "microsoft-edge"),
+    "opera": ("opera",), "vivaldi": ("vivaldi-stable", "vivaldi"), "whale": ("naver-whale-stable", "whale"),
+    "firefox": ("firefox",), "librewolf": ("librewolf",), "floorp": ("floorp",), "zen": ("zen-browser", "zen"),
+    "waterfox": ("waterfox",),
+}
+
+
+def links(acc: dict | None) -> list:
+    """[{name, url}] — saxlanmayıbsa standart 1 düymə (▶️ YouTube)."""
+    saved = (acc or {}).get("links")
+    if not isinstance(saved, list):
+        return [dict(x) for x in DEFAULT_LINKS]
+    return [x for x in saved if isinstance(x, dict) and x.get("name") and x.get("url")][:MAX_LINKS]
+
+
+def normalize_url(url: str) -> str:
+    """Yalnız http(s) linki: 'mail.google.com' → 'https://mail.google.com'. Yararsızdırsa ValueError."""
+    u = (url or "").strip()
+    if not u or any(c.isspace() for c in u) or len(u) > 300:
+        raise ValueError("link boşluqsuz olmalıdır (məs. mail.google.com)")
+    if "://" not in u:
+        u = "https://" + u
+    if not u.lower().startswith(("http://", "https://")) or "." not in u.split("://", 1)[1].split("/", 1)[0]:
+        raise ValueError("yalnız http / https linki (məs. https://mail.google.com)")
+    return u
+
+
+def clean_link_name(name: str) -> str:
+    return " ".join((name or "").split())[:24]
+
+
+def add_link(acc_id: str, name: str, url: str) -> dict:
+    acc = get(acc_id)
+    if not acc:
+        raise ValueError("hesab tapılmadı")
+    items = links(acc)
+    if len(items) >= MAX_LINKS:
+        raise ValueError(f"ən çox {MAX_LINKS} düymə ola bilər — birini sil")
+    name, url = clean_link_name(name), normalize_url(url)
+    if not name:
+        raise ValueError("düymənin adı boşdur")
+    items.append({"name": name, "url": url})
+    update(acc_id, links=items)
+    return items[-1]
+
+
+def rename_link(acc_id: str, idx: int, name: str) -> bool:
+    items = links(get(acc_id))
+    name = clean_link_name(name)
+    if not name or not 0 <= idx < len(items):
+        return False
+    items[idx]["name"] = name
+    return bool(update(acc_id, links=items))
+
+
+def remove_link(acc_id: str, idx: int) -> bool:
+    items = links(get(acc_id))
+    if not 0 <= idx < len(items):
+        return False
+    items.pop(idx)
+    return bool(update(acc_id, links=items))
+
+
+def can_open(acc: dict | None) -> bool:
+    """Bu hesabın brauzer profili serverdə varmı (düymələr yalnız belə hesablarda çıxır)."""
+    if not acc or acc.get("kind") != "browser" or not acc.get("profile"):
+        return False
+    return bool(acc.get("managed")) or os.path.exists(acc["profile"])
+
+
+def _find_exe(key: str) -> str | None:
+    for name in EXE_NAMES.get(key, ()):
+        path = shutil.which(name)
+        if path:
+            return path
+    return None
+
+
+def browser_cmd(acc: dict, url: str) -> tuple[list, dict]:
+    """Hesabın profilini açan əmr + mühit. Chromium ailəsi: --user-data-dir (öz profilimiz) və ya
+    --user-data-dir + --profile-directory (brauzerin adi profili); Firefox ailəsi: --profile. RuntimeError."""
+    from bot.core import webprofile as wp
+    key, prof = acc.get("browser") or "", os.path.abspath(acc.get("profile") or "")
+    spec = wp.BROWSERS.get(key) or {}
+    env, flags = _gui_env()
+    if spec.get("family") == "firefox":
+        exe = _find_exe(key)
+        if not exe:
+            raise RuntimeError(f"serverdə {spec.get('label', key)} tapılmadı")
+        return [exe, "--profile", prof, "--new-window", url], env
+    exe = _find_exe(key) or (chrome_bin() or (None,))[0]
+    if not exe:
+        raise RuntimeError("serverdə Chrome / Chromium / Brave tapılmadı")
+    own = acc.get("managed") or prof.startswith(os.path.abspath(PROFILES_DIR))
+    dirs = [f"--user-data-dir={prof}"] if own else [f"--user-data-dir={os.path.dirname(prof)}",
+                                                    f"--profile-directory={os.path.basename(prof)}"]
+    return [exe, *dirs, "--password-store=basic", "--no-first-run", "--no-default-browser-check", *flags,
+            "--new-window", url], env
+
+
+def open_url(acc_id: str, url: str) -> str:
+    """Serverin ekranında hesabın profilini həmin linklə aç (bloklayır — to_thread ilə). Alınmasa RuntimeError.
+    Profil artıq açıqdırsa Chrome yeni pəncərəni mövcud prosesdə açıb dərhal çıxır (kod 0) — bu da uğurdur."""
+    acc = get(acc_id)
+    if not can_open(acc):
+        raise RuntimeError("bu hesabın brauzer profili serverdə yoxdur (cookies.txt / əsas hesab)")
+    url = normalize_url(url)
+    cmd, env = browser_cmd(acc, url)
+    proc = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, start_new_session=True)
+    try:
+        code = proc.wait(2)
+    except subprocess.TimeoutExpired:
+        code = None                                  # hələ işləyir — pəncərə açılıb
+    if code not in (None, 0):
+        raise RuntimeError(f"brauzer açılmadı (kod {code}) — profil başqa brauzerdə açıq ola bilər")
+    logger.info(f"🔘 {acc['name']}: brauzerdə açıldı → {url}")
+    return url
+
+
 # ───────────────────────── 🩺 avtomatik yoxlama ─────────────────────────
 # Test nəticəsi yaddaşdadır (restartda itir) — başlanğıcdan bir az sonra və hər HEALTH_EVERY san.
 # bütün hesablar yoxlanılır; girişini itirən hesab rotasiyadan çıxır, sahibə xəbər gedir.

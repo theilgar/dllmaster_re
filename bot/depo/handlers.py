@@ -17,7 +17,8 @@ from aiogram import F, types
 from aiogram.filters import Command, CommandObject
 from aiogram.types import InlineKeyboardMarkup
 
-from bot.core import depo_helpers, panel as ui
+from bot.core import depo_helpers, panel as ui, stall_watch
+from bot.core.depo_tuning import TUNABLES
 from bot.core.panel import btn
 from bot.depo.cleaner import clean_song, parse_tg_target, tg_item, tl_message_item
 from bot.depo.crawler import COUNTRIES, HAS_YTM
@@ -45,6 +46,7 @@ from bot.depo.monitor import (
 )
 from bot.depo.panels import (
     helpers_guide_view,
+    tune_guide_view,
     df_top_interval_picker_view,
     dd_result_view,
     sync_result_view,
@@ -55,6 +57,9 @@ from bot.depo.panels import (
     make_views,
 )
 from bot.depo.scanner import HAS_TELETHON, TgUser
+from bot.depo.shard_cmd import make_shard_cmd
+from bot.depo import ytm_menu
+from bot.depo.shard_menu import make_shard_menu
 from common.utilities import spawn
 from userbot.core import tg_session
 
@@ -74,6 +79,8 @@ def setup(context):
     filler.tg = tg
     helpers = depo_helpers.install(context)
     filler.helpers = helpers
+    shard_cmd = make_shard_cmd(bot, helpers)
+    shard_menu = make_shard_menu(dp, bot, helpers, context.is_creator)
     try:
         spawn(helpers.reload())
     except RuntimeError:
@@ -117,7 +124,7 @@ def setup(context):
     # music_plugin / links_plugin bu yoxlamaya baxır — daxiletmə gözlənilərkən axtarış başlamasın
     context.depo_waiting = lambda uid: (
         hp_waiting(uid) or hp_rate_waiting(uid) or df_val_waiting(uid)
-        or clean_waiting(uid) or cq_add_waiting(uid)
+        or clean_waiting(uid) or cq_add_waiting(uid) or shard_menu.waiting(uid)
     )
 
     stop_kb = InlineKeyboardMarkup(inline_keyboard=[[btn("⏹ Skanı dayandır", "scan:stop")]])
@@ -231,40 +238,38 @@ def setup(context):
 
     @dp.message(F.chat.type == "private", F.text, ~F.text.startswith("/"), waiting_hp_rate)
     async def helper_rate_input(message: types.Message):
-        raw = message.text.strip().lower()
+        raw = message.text.strip().lower().replace(",", ".")
         try:
             await message.delete()
         except Exception as _e:
             logger.debug("udulan xəta [bot/plugins/depo_filler_plugin.py:3446]: %r", _e)
         note = ""
         coords = (hp_rate_wait["chat_id"], hp_rate_wait["msg_id"])
+        key = hp_rate_wait.get("key") or "rate"
+        t = TUNABLES.get(key) or TUNABLES["rate"]
         if raw in ("-", "min", "off"):
-            v = helpers.set_rate(1)
-            note = f"✅ Sürət limiti: {v} mahnı/dəq. (minimum)"
+            note = f"✅ {t.label}: {t.fmt(helpers.set_tune(t.key, t.lo))} · minimum"
         elif raw in ("+", "max", "sonsuz"):
-            v = helpers.set_rate(60)
-            note = f"✅ Sürət limiti: {v} mahnı/dəq. (maksimum)"
-        elif raw.isdigit():
-            val = int(raw)
-            v = helpers.set_rate(val)
-            note = f"✅ Sürət limiti: {v} mahnı/dəq. hər bot"
+            note = f"✅ {t.label}: {t.fmt(helpers.set_tune(t.key, t.hi))} · maksimum"
+        elif re.fullmatch(r"\d+(\.\d+)?", raw):
+            note = f"✅ {t.label}: {t.fmt(helpers.set_tune(t.key, float(raw)))}"
         else:
             text = (
-                "🤖 <b>Köməkçi botlar › Sürət limiti</b>\n━━━━━━━━━━━━━━━━━━\n"
+                f"🎛 <b>Tənzimləmələr › {t.label}</b>\n━━━━━━━━━━━━━━━━━━\n"
                 f"⚠️ <b>\"{escape(message.text[:30])}\" düzgün deyil!</b>\n\n"
                 "✍️ <i>Yalnız aşağıdakılardan birini yazın:</i>\n"
-                "• <b>Rəqəm</b> (məs: <code>15</code>)\n"
-                "• <b>+</b> (maksimum 60)\n"
-                "• <b>-</b> (minimum 1)\n"
+                f"• <b>Rəqəm</b> — {t.lo:g} ilə {t.hi:g} arası (məs: <code>{t.default:g}</code>)\n"
+                f"• <b>+</b> (maksimum {t.hi:g})\n"
+                f"• <b>-</b> (minimum {t.lo:g})\n"
             )
-            kb = InlineKeyboardMarkup(inline_keyboard=[[btn("✖️ Ləğv et", "df:pick:hpr")]])
+            kb = InlineKeyboardMarkup(inline_keyboard=[[btn("✖️ Ləğv et", f"df:tn:{t.key}")]])
             if coords[1]:
                 with contextlib.suppress(Exception):
                     await bot.edit_message_text(chat_id=coords[0], message_id=coords[1], text=text, parse_mode="HTML", reply_markup=kb)
             return
 
         hp_rate_wait["until"] = 0
-        text, kb = df_rate_picker_view(note)
+        text, kb = df_tune_view(t.key, note)
         if coords[1]:
             with contextlib.suppress(Exception):
                 await bot.edit_message_text(chat_id=coords[0], message_id=coords[1], text=text, parse_mode="HTML", reply_markup=kb)
@@ -450,7 +455,8 @@ def setup(context):
     sources_view = _v.sources_view
     df_delay_picker_view = _v.df_delay_picker_view
     df_worker_picker_view = _v.df_worker_picker_view
-    df_rate_picker_view = _v.df_rate_picker_view
+    df_tune_hub_view = _v.df_tune_hub_view
+    df_tune_view = _v.df_tune_view
     fail_view = _v.fail_view
     queue_view = _v.queue_view
     country_queries_list_view = _v.country_queries_list_view
@@ -613,7 +619,7 @@ def setup(context):
                 miss = len(st["missing"])
                 ok = bool(miss) and st["checked"] and miss / st["checked"] <= SYNC_AUTO_MAX
                 if ok:
-                    await asyncio.to_thread(filler.sync_apply, st["depo_id"], st["missing"], True)
+                    await asyncio.to_thread(filler.sync_apply_all, st, True)
                 filler._set("last_sync", json.dumps({"ts": time.time(), "total": st["total"], "missing": miss,
                                                      "applied": bool(ok)}))
                 logger.info(f"🧹 Avtomatik sinxronizasiya: {st['total']} post, {miss} yoxdur"
@@ -630,11 +636,11 @@ def setup(context):
                             failed = set(json.loads(filler._get("novid_failed") or "[]"))
                         except ValueError:
                             failed = set()
-                        todo = [p for p in dst.get("novid_posts") or [] if p["mid"] not in failed][:NOVID_AUTO_MAX]
+                        todo = [p for p in dst.get("novid_posts") or [] if filler.post_key_of(p, dst["depo_id"]) not in failed][:NOVID_AUTO_MAX]
                         if todo and not dst["stopped"]:
                             m = await filler.match_novid(todo)
                             n = await asyncio.to_thread(filler.novid_link, dst["depo_id"], m["matched"])
-                            failed |= {p["mid"] for p in m["unmatched"]}
+                            failed |= {filler.post_key_of(p, dst["depo_id"]) for p in m["unmatched"]}
                             filler._set("novid_failed", json.dumps(sorted(failed)[-5000:]))
                             logger.info(f"🔎 ID-siz depo postları: {n} bağlandı, {len(m['unmatched'])} tapılmadı")
                     except Exception as e:
@@ -651,6 +657,7 @@ def setup(context):
 
     try:
         sync_state["auto"] = asyncio.get_running_loop().create_task(auto_sync_loop())
+        asyncio.get_running_loop().create_task(stall_watch.watch(filler))        # ilişəndə daxili vəziyyəti yazır
     except RuntimeError:
         pass
     context.depo_sync_state = sync_state
@@ -714,6 +721,15 @@ def setup(context):
         if low.startswith(("fail", "xəta")):
             text, kb = fail_view()
             await message.answer(text, parse_mode="HTML", reply_markup=kb)
+            return
+        if low.startswith(("stacks", "stall")):
+            report = stall_watch.build_report(filler)
+            path = stall_watch.write(report)
+            await message.answer(f"<pre>{escape(stall_watch.summary(report))[:3500]}</pre>\n📄 <code>{escape(path)}</code>",
+                                 parse_mode="HTML")
+            return
+        if low.startswith("shard"):
+            await shard_cmd(message, args)
             return
         if low.startswith(("helper", "köməkçi", "komekci")):
             rest = args.split(None, 1)[1].strip() if len(args.split(None, 1)) > 1 else ""
@@ -786,6 +802,10 @@ def setup(context):
             clean_wait["until"] = 0
         if action != "cqadd":
             cq_add_wait["until"] = 0
+        if action not in ("tv", "vinp"):
+            hp_rate_wait["until"] = 0
+        if action != "sha":
+            shard_menu.wait["until"] = 0
 
         async def show(text, kb):
             try:
@@ -794,6 +814,9 @@ def setup(context):
                 if "not modified" not in str(e):
                     logger.warning(f"Depo paneli yenilənmədi: {e}")
 
+        if action in ytm_menu.ACTIONS:                         # 🔎 YT Music skaneri — paralel say (bot/depo/ytm_menu.py)
+            await ytm_menu.handle(filler, action, parts, cb, show)
+            return
         if action in ("dm", "wm") and len(parts) > 2 and parts[2] in ("auto", "manual"):
             which = "delay" if action == "dm" else "workers"
             await asyncio.to_thread(filler.set_mode, which, parts[2])
@@ -906,7 +929,7 @@ def setup(context):
                 await show(*sync_intro())
                 return
             block = parts[2] == "b"
-            r = await asyncio.to_thread(filler.sync_apply, st["depo_id"], st["missing"], block)
+            r = await asyncio.to_thread(filler.sync_apply_all, st, block)
             sync_state["pending"] = None
             filler._set("last_sync", json.dumps({"ts": time.time(), "total": st["total"],
                                                  "missing": len(st["missing"]), "applied": True}))
@@ -1202,26 +1225,77 @@ def setup(context):
             await cb.answer(depo_helpers.SCOPES.get(parts[2], ""))
             await show(*helpers_view())
             return
-        elif action in ("pick", "hpr") and (len(parts) <= 2 or parts[2] == "hpr"):
-            arg = parts[2] if len(parts) > 2 else ""
-            if arg in ("+", "-"):
-                v = helpers.step_rate(1 if arg == "+" else -1)
-                await cb.answer(f"⏱ {v} mahnı/dəq. hər bot" + (" · ⚠️ 20-dən çox flood riski" if v > 20 else ""))
-                await show(*helpers_view())
-                return
-            hp_rate_wait["until"] = 0
+        elif action in ("sh", "sha", "shc", "shx", "shh", "shd", "shdy", "shp", "shw", "shs"):
+            await shard_menu.handle(cb, parts, show)
+            return
+        elif action == "tn":
+            key = parts[2] if len(parts) > 2 else ""
             await cb.answer()
-            await show(*df_rate_picker_view())
+            await show(*(df_tune_view(key) if key in TUNABLES else df_tune_hub_view()))
+            return
+        elif action == "tng":
+            await cb.answer()
+            await show(*tune_guide_view())
+            return
+        elif action == "tpf":
+            on = helpers.toggle_turbo()
+            kept = helpers.manual_keys()
+            await cb.answer("🚀 Köməkçi turbo aktiv" if on else "Balanslı rejim")
+            await show(*df_tune_hub_view(
+                ("🚀 Köməkçi turbo aktivdir" if on else "✓ Balanslı rejimə qayıdıldı")
+                + (f" · ✋ {len(kept)} manual ayara toxunulmadı" if on and kept else "")))
+            return
+        elif action == "tna":
+            helpers.all_auto()
+            await cb.answer("🤖 Hamısı avto")
+            await show(*df_tune_hub_view("✓ Bütün ayarlar avto rejimdədir"))
+            return
+        elif action in ("tm", "ts", "tr", "tv") and len(parts) > 2 and parts[2] in TUNABLES:
+            key = parts[2]
+            t = TUNABLES[key]
+            if action == "tm" and len(parts) > 3 and parts[3] in ("auto", "manual"):
+                helpers.set_tune_mode(key, parts[3])
+                await cb.answer("🤖 Avto" if parts[3] == "auto" else "✋ Manual — dəyəri özün seç")
+                await show(*df_tune_view(key))
+            elif action == "ts" and len(parts) > 3:
+                try:
+                    v = helpers.step_tune(key, float(parts[3]))
+                except ValueError:
+                    await cb.answer()
+                    return
+                await cb.answer(f"{t.icon} {t.fmt(v)}")
+                await show(*df_tune_view(key, f"✓ {t.fmt(v)}"))
+            elif action == "tr":
+                helpers.reset_tune(key)
+                await cb.answer("↩️ Başlanğıc dəyər")
+                await show(*df_tune_view(key))
+            elif action == "tv":
+                hp_rate_wait.update(until=time.time() + 300, chat_id=cb.message.chat.id,
+                                    msg_id=cb.message.message_id, key=key)
+                await cb.answer()
+                text = (
+                    f"🎛 <b>Tənzimləmələr › {t.label}</b>\n━━━━━━━━━━━━━━━━━━\n"
+                    f"Hazırkı dəyər: <b>{t.fmt(helpers.tune(key))}</b>\n\n"
+                    f"✍️ <b>{t.label} üçün dəyəri daxil edin:</b>\n"
+                    f"• <b>Rəqəm</b> yazın (məs: <code>{t.default:g}</code>) — {t.lo:g} ilə {t.hi:g} arası\n"
+                    f"• <b>+</b> yazın — maksimum (<code>{t.hi:g}</code>)\n"
+                    f"• <b>-</b> yazın — minimum (<code>{t.lo:g}</code>)\n"
+                )
+                await show(text, InlineKeyboardMarkup(inline_keyboard=[[btn("✖️ Ləğv et", f"df:tn:{key}")]]))
+            return
+        elif action == "pick" and len(parts) > 2 and parts[2] == "hpr":          # köhnə mesajlardakı düymə
+            await cb.answer()
+            await show(*df_tune_view("rate"))
             return
         elif action == "vstep" and len(parts) > 2:
             target = parts[2]
             delta = int(parts[3]) if len(parts) > 3 else 1
             bk = parts[4] if len(parts) > 4 else "p"
             back_url = "dt:start" if bk == "dt" else "df:panel"
-            if target == "hpr":
-                v = helpers.step_rate_delta(delta)
+            if target == "hpr":                                               # köhnə mesajlardakı düymə
+                v = helpers.step_tune("rate", delta)
                 await cb.answer(f"⏱ {v} mahnı/dəq. hər bot")
-                await show(*df_rate_picker_view(f"✓ {v} mahnı/dəq. hər bot"))
+                await show(*df_tune_view("rate", f"✓ {v} mahnı/dəq. hər bot"))
             elif target == "d":
                 v = filler.step_delay_delta(delta)
                 await cb.answer(f"⏱ {v} san.")
@@ -1246,19 +1320,19 @@ def setup(context):
             bk = parts[3] if len(parts) > 3 else "p"
             back_url = "dt:start" if bk == "dt" else "df:panel"
             await cb.answer()
-            if target == "hpr":
-                hp_rate_wait.update(until=time.time() + 300, chat_id=cb.message.chat.id, msg_id=cb.message.message_id)
-                cur = helpers.rate
+            if target == "hpr":                                               # köhnə mesajlardakı düymə
+                hp_rate_wait.update(until=time.time() + 300, chat_id=cb.message.chat.id,
+                                    msg_id=cb.message.message_id, key="rate")
+                t = TUNABLES["rate"]
                 text = (
-                    "🤖 <b>Köməkçi botlar › Sürət limiti</b>\n━━━━━━━━━━━━━━━━━━\n"
-                    f"Hazırkı sürət limiti: <b>{cur} mahnı/dəq. hər bot</b>\n\n"
+                    f"🎛 <b>Tənzimləmələr › {t.label}</b>\n━━━━━━━━━━━━━━━━━━\n"
+                    f"Hazırkı dəyər: <b>{t.fmt(helpers.tune('rate'))}</b>\n\n"
                     "✍️ <b>Sürət limitini daxil edin:</b>\n"
-                    "• <b>Rəqəm</b> yazın (məs: <code>15</code>) — 1 ilə 60 arası\n"
-                    "• <b>+</b> yazın — maksimum (<code>60</code>)\n"
-                    "• <b>-</b> yazın — minimum (<code>1</code>)\n"
+                    f"• <b>Rəqəm</b> yazın (məs: <code>15</code>) — {t.lo:g} ilə {t.hi:g} arası\n"
+                    f"• <b>+</b> yazın — maksimum (<code>{t.hi:g}</code>)\n"
+                    f"• <b>-</b> yazın — minimum (<code>{t.lo:g}</code>)\n"
                 )
-                kb = InlineKeyboardMarkup(inline_keyboard=[[btn("✖️ Ləğv et", "df:pick:hpr")]])
-                await show(text, kb)
+                await show(text, InlineKeyboardMarkup(inline_keyboard=[[btn("✖️ Ləğv et", "df:tn:rate")]]))
             elif target == "d":
                 df_val_wait.update(target="d", until=time.time() + 300, chat_id=cb.message.chat.id, msg_id=cb.message.message_id, back=back_url)
                 cur = filler.delay
@@ -1324,6 +1398,7 @@ def setup(context):
             return
         elif action == "hpchk":
             await cb.answer("🔄 Yoxlanılır...")
+            helpers.clear_channel_cool()                       # 🌊 kanal dayanması da ləğv olunur — yenidən sınansın
             if len(helpers.tokens()) != len(helpers.helpers):
                 await helpers.reload()
             else:

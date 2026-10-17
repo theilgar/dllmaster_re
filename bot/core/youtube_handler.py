@@ -266,12 +266,6 @@ def _mode(key: str, value_key: str, auto_value: str) -> str:
     return "manual" if v not in (None, "", auto_value) else "auto"
 
 
-def set_mode_setting(key: str, mode: str):
-    if mode in ("auto", "manual"):
-        from common.database import set_setting
-        set_setting(key, mode)
-
-
 BATCH_MODE_SETTING, SEARCH_MODE_SETTING, FMT_MODE_SETTING = "dl:batch_mode", "search:mode", "dl:fmt_mode"
 
 
@@ -618,21 +612,6 @@ def reset_attempts():
     _att_save()
 
 
-def attempt_order_info() -> str:
-    _att_load()
-    now = time.time()
-    pen = [f"{k} ({int((t - now) / 60)} dəq.)" for k, t in _att["penalty"].items() if t > now]
-    w = _att["winners"]
-    text = f"🎯 birinci: 👤 {w.get('download') or '—'} · 📦 {w.get('depo') or '—'}"
-    if pen:
-        text += f" · ⏬ arxada: {', '.join(pen)}"
-    for lane, icon in (("download", "👤"), ("depo", "📦")):
-        cb = cookie_block_left(lane)
-        if cb:
-            text += f" · 🍪 {icon} bütün hesablar bloklu ({cb // 60 + 1} dəq.)"
-    return text
-
-
 def _build_attempts(kind: str = "download") -> list:
     """(təsvir, cookies istifadə olunsun?, player_client) — öyrənilmiş sıra ilə."""
     attempts = []
@@ -916,10 +895,6 @@ try:                                    # pip install ytmusicapi — artist + m�
 except Exception:
     YTMusic = None
 _ytmusic = None
-
-
-def ytmusicapi_available() -> bool:
-    return YTMusic is not None
 
 
 def _get_ytmusic():

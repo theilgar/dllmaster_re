@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 from html import escape
@@ -50,15 +51,141 @@ def redact(text: str) -> str:
     return text
 
 
+def auth_args() -> list:
+    """GitHub tokeni varsa `git -c http.…extraheader=…` arqumentləri (yoxdursa boş). Şəxsi repo üçün fetch / push-da lazımdır —
+    tokensiz `git fetch` «Repository not found / Authentication failed» verir."""
+    tok = _token()
+    if not tok:
+        return []
+    basic = base64.b64encode(f"x-access-token:{tok}".encode()).decode()
+    return ["-c", f"http.https://github.com/.extraheader=AUTHORIZATION: basic {basic}"]
+
+
+MAX_FILE_MB = float(os.getenv("GITHUB_MAX_FILE_MB", "50"))     # GitHub 100 MB-dan böyük faylı qəbul etmir, 50 MB-dan xəbərdarlıq verir
+
+
+def is_oversize(root: Path, path: str) -> bool:
+    """Fayl göndərmək üçün çox böyükdür (məs. 2 GB yedək arxivi `git add`-ı saatlarla yeyir, push isə rədd olunur)."""
+    try:
+        return (Path(root) / path).is_file() and (Path(root) / path).stat().st_size > MAX_FILE_MB * 1048576
+    except OSError:
+        return False
+
+
+STALE_LOCK_AGE = 120.0       # san. — bundan köhnə və heç bir git işləmirsə, index.lock yarımçıq qalıb sayılır
+
+
+def clear_stale_lock(root: Path) -> bool:
+    """Yarımçıq qalmış .git/index.lock (git əmri restart / bağlanma ilə kəsilib) hər sonrakı commit-i
+    «Unable to create index.lock» ilə bloklayır. Heç bir git prosesi yoxdursa və kilid köhnədirsə silir → silindimi."""
+    lock = Path(root) / ".git" / "index.lock"
+    try:
+        age = time.time() - lock.stat().st_mtime
+    except OSError:
+        return False
+    if age < STALE_LOCK_AGE:
+        return False
+    try:
+        running = subprocess.run(["pgrep", "-x", "git"], capture_output=True, timeout=5).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        running = age < 600                    # pgrep yoxdur — yalnız çox köhnə kilid silinir
+    if running:
+        return False
+    try:
+        lock.unlink()
+    except OSError as e:
+        logger.warning(f"🐙 köhnə index.lock silinmədi: {e}")
+        return False
+    logger.warning(f"🐙 yarımçıq qalmış .git/index.lock silindi (yaşı {int(age // 60)} dəq., git işləmirdi)")
+    return True
+
+
+def _env() -> dict:
+    return dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="true", LC_ALL="C", **ssh_key.env())   # 🔐 SSH açarı varsa
+
+
+PROGRESS_RE = re.compile(r"(Counting|Compressing|Writing) objects:\s+(\d+)%")
+# push mərhələsində git-in fazaları: (başlanğıc, uzunluq) — Writing ən uzunudur (faktiki yükləmə)
+PUSH_PHASES = {"Counting": (0.0, 0.10), "Compressing": (0.10, 0.30), "Writing": (0.40, 0.60)}
+
+
+def push_fraction(line: str):
+    """`Writing objects:  45% (9/20)` → push mərhələsinin 0..1 hissəsi; tanınmayan sətir üçün None."""
+    m = PROGRESS_RE.search(line or "")
+    if not m:
+        return None
+    start, span = PUSH_PHASES[m.group(1)]
+    return min(1.0, start + span * int(m.group(2)) / 100)
+
+
+def git_stream(root: Path, *args, timeout=120, auth=False, on_line=None):
+    """`git` əmri; stderr sətir-sətir (\\r və \\n ilə) on_line(sətir)-ə verilir — `git push --progress` faizləri üçün.
+    Qaytarır: (kod, stdout, stderr) — git() ilə eyni forma."""
+    cmd = ["git", "-C", str(root)] + (auth_args() if auth else []) + list(args)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=_env())
+    timed_out = []
+    timer = threading.Timer(timeout, lambda: (timed_out.append(1), proc.kill()))
+    timer.start()
+    out_chunks: list = []
+    drain = threading.Thread(target=lambda: out_chunks.append(proc.stdout.read()), daemon=True)
+    drain.start()
+    err_chunks, buf = [], b""
+    try:
+        while True:
+            data = os.read(proc.stderr.fileno(), 4096)
+            if not data:
+                break
+            err_chunks.append(data)
+            if on_line:
+                *lines, buf = re.split(rb"[\r\n]", buf + data)
+                for ln in lines:
+                    if ln:
+                        try:
+                            on_line(ln.decode(errors="replace"))
+                        except Exception as e:                  # irəliləyiş göstəricisi push-u sındırmasın
+                            logger.debug(f"git progress callback: {e}")
+        proc.wait()
+    finally:
+        timer.cancel()
+        drain.join(5)
+    if timed_out:
+        return 124, "", f"git {args[0]}: vaxt bitdi ({timeout} san.)"
+    out = b"".join(out_chunks).decode(errors="replace").strip()
+    return proc.returncode, out, redact(b"".join(err_chunks).decode(errors="replace").strip())
+
+
+def cleanup_after_kill(root: Path) -> None:
+    """Vaxt bitdiyi üçün öldürülən git əmri arxasında .git/index.lock və yarımçıq tmp_pack_* faylları qoyur (böyük fayl
+    `git add` olunanda onlarla GB: bu halda disk dolur və hər sonrakı commit kilidə dirənir). Başqa git işləmirsə təmizlənir."""
+    try:
+        if subprocess.run(["pgrep", "-x", "git"], capture_output=True, timeout=5).returncode == 0:
+            return
+    except (OSError, subprocess.SubprocessError):
+        return
+    git_dir = Path(root) / ".git"
+    freed = 0
+    for target in [git_dir / "index.lock", *(git_dir / "objects" / "pack").glob("tmp_pack_*")]:
+        try:
+            freed += target.stat().st_size
+            target.unlink()
+        except OSError:
+            pass
+    if freed:
+        logger.warning(f"🐙 öldürülən git əmrindən qalan fayllar təmizləndi ({freed // 1048576} MB)")
+    else:
+        logger.info("🐙 öldürülən git əmrindən qalan kilid təmizləndi")
+
+
 def git(root: Path, *args, timeout=60, auth=False, raw=False):
     cmd = ["git", "-C", str(root)]
-    if auth and _token():
-        basic = base64.b64encode(f"x-access-token:{_token()}".encode()).decode()
-        cmd += ["-c", f"http.https://github.com/.extraheader=AUTHORIZATION: basic {basic}"]
-    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="true", LC_ALL="C", **ssh_key.env())   # 🔐 SSH açarı varsa
+    if auth:
+        cmd += auth_args()
+    env = _env()
     try:
         r = subprocess.run(cmd + list(args), capture_output=True, text=True, timeout=timeout, env=env)
     except subprocess.TimeoutExpired:
+        if args and args[0] in ("add", "commit", "reset", "stash", "checkout", "rm", "mv"):
+            cleanup_after_kill(root)
         return 124, "", f"git {args[0]}: vaxt bitdi ({timeout} san.)"
     return r.returncode, (r.stdout if raw else r.stdout.strip()), redact(r.stderr.strip())
 
@@ -82,6 +209,9 @@ def push_hint(err: str) -> str:
         return "Giriş alınmadı: GitHub Token və ya SSH açarını yoxlayın. <b>⚙️ Quraşdırma</b> panelindən token təyin edə bilərsiniz."
     if "could not resolve host" in e or "unable to access" in e:
         return "GitHub-a qoşulmaq alınmadı (şəbəkə xətası)."
+    if "index.lock" in e:
+        return ("Başqa git prosesi işləyir və ya köhnə kilid qalıb. Heç nə işləmirsə: "
+                "<code>rm .git/index.lock</code> (bot köhnə kilidi özü də silir).")
     return ""
 
 
@@ -99,8 +229,18 @@ def default_commit_message(files: dict, started: float) -> str:
     return title + ("\n\n" + "\n".join(body) if body else "")
 
 
-def push_update(root: Path, paths: list, message: str) -> dict:
+def push_update(root: Path, paths: list, message: str, progress=None) -> dict:
+    """commit + push. progress(hissə 0..1, mərhələ) — başqa thread-dən çağırıla bilər (bot/updater/progress.py)."""
     res = {"ok": False, "committed": False, "error": "", "hint": ""}
+
+    def step(frac: float, label: str):
+        if progress:
+            try:
+                progress(frac, label)
+            except Exception as e:
+                logger.debug(f"push progress: {e}")
+
+    step(0.02, "Repo yoxlanılır")
 
     rc, _, _ = git(root, "rev-parse", "--is-inside-work-tree")
     if rc != 0:
@@ -128,6 +268,8 @@ def push_update(root: Path, paths: list, message: str) -> dict:
                        f"(fayllar silinmir), sonra yenidən göndərin.")
         return res
 
+    clear_stale_lock(root)                                      # kəsilmiş git əmrindən qalan kilid commit-i blokladığı üçün
+    step(0.10, "Fayllar seçilir")
     use, to_add = [], []
     for p in paths:
         tracked = git(root, "ls-files", "--error-unmatch", "--", p)[0] == 0
@@ -136,13 +278,17 @@ def push_update(root: Path, paths: list, message: str) -> dict:
             continue
         if git(root, "check-ignore", "-q", "--", p)[0] == 0:
             continue
+        if is_oversize(root, p):
+            res.setdefault("oversize", []).append(p)
+            continue
         use.append(p)
         if tracked or (root / p).exists():
             to_add.append(p)
     res["files"] = use
 
     if use:
-        rc, _, err = git(root, "add", "-A", "--", *to_add) if to_add else (0, "", "")
+        step(0.20, f"Fayllar əlavə olunur ({len(to_add)})")
+        rc, _, err = git(root, "add", "-A", "--", *to_add, timeout=300) if to_add else (0, "", "")
         if rc != 0:
             res["error"] = f"git add:\n{short_error(err)}"
             return res
@@ -153,13 +299,21 @@ def push_update(root: Path, paths: list, message: str) -> dict:
                 ident += ["-c", "user.name=DLLMaster Bot"]
             if not git(root, "config", "user.email")[1]:
                 ident += ["-c", "user.email=bot@dllmaster.local"]
-            rc, _, err = git(root, *ident, "commit", "-m", message, "--", *use)
+            step(0.35, "Commit yaradılır")
+            rc, _, err = git(root, *ident, "commit", "-m", message, "--", *use, timeout=180)
             if rc != 0:
                 res["error"] = f"git commit:\n{short_error(err)}"
                 return res
             res["committed"] = True
 
-    rc, _, err = git(root, "push", "-u", remote, branch, timeout=120, auth=True)
+    step(0.45, "GitHub-a yüklənir")
+
+    def on_line(line: str):
+        f = push_fraction(line)
+        if f is not None:
+            step(0.45 + 0.52 * f, "GitHub-a yüklənir")
+
+    rc, _, err = git_stream(root, "push", "--progress", "-u", remote, branch, timeout=120, auth=True, on_line=on_line)
     if rc != 0:
         res["error"] = f"git push:\n{short_error(err)}"
         res["hint"] = push_hint(err)
@@ -172,6 +326,7 @@ def push_update(root: Path, paths: list, message: str) -> dict:
     res["url"] = f"{web}/commit/{full}" if web else None
     others = [l for l in git(root, "status", "--porcelain")[1].splitlines() if l.strip()]
     res["others"] = len(others)
+    step(1.0, "Hazırdır")
     return res
 
 
@@ -467,8 +622,8 @@ def working_changes(root: Path):
             kind = "deleted"
         else:
             kind = "modified"
-        if is_sensitive(path):
-            excluded.append((kind, path))
+        if is_sensitive(path) or (kind != "deleted" and is_oversize(root, path)):
+            excluded.append((kind, path))                  # həssas və ya çox böyük fayl heç vaxt avtomatik seçilmir
         else:
             changes.append((kind, path))
     return changes, excluded
@@ -524,7 +679,7 @@ def full_commit_message(changes, started: float, label: str = "Tam yeniləmə") 
     return title + ("\n\n" + "\n".join(body) if body else "")
 
 
-def push_all(root: Path, message, selected=None) -> dict:
+def push_all(root: Path, message, selected=None, progress=None) -> dict:
     changes, excluded = working_changes(root)
     if selected is None:
         chosen, skipped = changes, excluded
@@ -534,10 +689,11 @@ def push_all(root: Path, message, selected=None) -> dict:
         skipped = [(k, p) for k, p in everything if p not in selected]
     paths = sorted({p for _, p in chosen})
     label = "Tam yeniləmə" if selected is None else "Seçilmiş yeniləmə"
-    res = push_update(root, paths, message or full_commit_message(chosen, time.time(), label))
+    res = push_update(root, paths, message or full_commit_message(chosen, time.time(), label), progress=progress)
     res["changes"] = chosen
     res["skipped"] = len({p for _, p in skipped})
     res["excluded"] = [p for _, p in skipped if is_sensitive(p)]
+    res["oversize_skipped"] = [p for _, p in skipped if is_oversize(root, p)]
     res["sensitive_sent"] = [p for p in paths if is_sensitive(p)]
     if res.get("ok"):
         left, left_ex = working_changes(root)

@@ -153,18 +153,6 @@ def confirm(yes_data: str, no_data: str, verb: str = "təsdiqlə") -> list:
     return [btn(f"✅ Bəli, {verb}", yes_data), btn("✖️ İmtina", no_data)]
 
 
-def premium_btn(text: str = "💎 Premium al", data: str = "sg:premium", url: str = None) -> InlineKeyboardButton:
-    return url_btn(text, url) if url else btn(text, data)
-
-
-def stop_btn(text: str = "⏹ Dayandır", data: str = "dlall_stop") -> InlineKeyboardButton:
-    return btn(text, data)
-
-
-def progress_btn(text: str = "📊 Proses", data: str = "bview:prog") -> InlineKeyboardButton:
-    return btn(text, data)
-
-
 def kb(*rows) -> InlineKeyboardMarkup:
     """Boş sətirləri ataraq klaviatura: kb([..], cond and [..], nav(...))."""
     return InlineKeyboardMarkup(inline_keyboard=[list(r) for r in rows if r])

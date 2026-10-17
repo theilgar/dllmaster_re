@@ -37,6 +37,7 @@ from bot.menus.views.youtube_accs import (
     yta_list_view,
     yta_login_view,
     yta_own_device_view,
+    yta_links_view,
     yta_server_login_view,
 )
 from common.database import get_db
@@ -256,6 +257,9 @@ async def _mcb_yta(cb: CallbackQuery, parts: list, action: str):
     aid = parts[3] if len(parts) > 3 else ""
     if sub not in ("addf", "rf", "nm", "lo", "relogin"):
         yta_inp["stage"] = None
+    if sub in ("ol", "lk", "la", "ld", "ln"):               # 🔘 hesabın düymələri (brauzerdə aç)
+        await _yta_links(cb, parts, sub, aid)
+        return
     if sub == "a":
         await cb.answer()
         await safe_edit_cb(cb, *yta_acc_view(aid))
@@ -567,6 +571,68 @@ async def _mcb_yta(cb: CallbackQuery, parts: list, action: str):
         await safe_edit_cb(cb, *yta_list_view())
 
 
+def _link_idx(parts: list) -> int:
+    return int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else -1
+
+
+async def _yta_links(cb: CallbackQuery, parts: list, sub: str, aid: str):
+    """ol — düyməni aç · lk — idarə səhifəsi · la — əlavə (hazır / öz linki) · ld — sil · ln — adı dəyiş."""
+    from bot.core import yt_accounts as ya
+
+    a = ya.get(aid)
+    if not a:
+        await cb.answer("⚠️ Hesab tapılmadı", show_alert=True)
+        await safe_edit_cb(cb, *yta_list_view("⚠️ Hesab tapılmadı"))
+        return
+    idx = _link_idx(parts)
+    items = ya.links(a)
+    if sub == "ol":
+        if not 0 <= idx < len(items):
+            await cb.answer("Düymə tapılmadı — səhifəni yenilə", show_alert=True)
+            return
+        await cb.answer("🖥 Brauzer açılır...")
+        try:
+            url = await asyncio.to_thread(ya.open_url, aid, items[idx]["url"])
+            note = f"🟢 <b>{escape(items[idx]['name'])}</b> serverin ekranında açıldı\n<code>{escape(url[:60])}</code>"
+        except Exception as e:
+            note = f"❌ {escape(str(e)[:200])}"
+        await safe_edit_cb(cb, *yta_acc_view(aid, note))
+    elif sub == "lk":
+        await cb.answer()
+        await safe_edit_cb(cb, *yta_links_view(aid))
+    elif sub == "la":
+        key = parts[4] if len(parts) > 4 else ""
+        if key == "own":
+            await cb.answer()
+            yta_inp.update(stage="await_lurl", acc=aid, chat_id=cb.message.chat.id, panel_id=cb.message.message_id)
+            await safe_edit_cb(
+                cb, "🔗 Linki yaz (məs. <code>mail.google.com</code> və ya <code>https://studio.youtube.com</code>):",
+                InlineKeyboardMarkup(inline_keyboard=[[_btn("✖️ Ləğv et", f"yta:lk:{aid}")]]))
+        elif key in ya.LINK_PRESETS:
+            label, url = ya.LINK_PRESETS[key]
+            try:
+                ya.add_link(aid, label, url)
+                await cb.answer("➕ Əlavə olundu — ✏️ ilə öz adını ver")
+                await safe_edit_cb(cb, *yta_links_view(aid, f"➕ {escape(label)} əlavə olundu"))
+            except ValueError as e:
+                await cb.answer(f"⚠️ {e}"[:150], show_alert=True)
+        else:
+            await cb.answer("Naməlum düymə", show_alert=True)
+    elif sub == "ld":
+        ok = ya.remove_link(aid, idx)
+        await cb.answer("🗑 Silindi" if ok else "Tapılmadı")
+        await safe_edit_cb(cb, *yta_links_view(aid, "🗑 Düymə silindi" if ok else "⚠️ Düymə tapılmadı"))
+    elif sub == "ln":
+        if not 0 <= idx < len(items):
+            await cb.answer("Düymə tapılmadı", show_alert=True)
+            return
+        await cb.answer()
+        yta_inp.update(stage="await_lname", acc=aid, idx=idx, chat_id=cb.message.chat.id, panel_id=cb.message.message_id)
+        await safe_edit_cb(
+            cb, f"✏️ <b>{escape(items[idx]['name'])}</b> düyməsinin yeni adını yaz (24 simvola qədər, emoji ola bilər):",
+            InlineKeyboardMarkup(inline_keyboard=[[_btn("✖️ Ləğv et", f"yta:lk:{aid}")]]))
+
+
 async def _mcb_web(cb: CallbackQuery, parts: list, action: str):
     from bot.core import webprofile as wp
 
@@ -789,6 +855,35 @@ async def yta_name_input(message: Message):
         await yta_show(yta_acc_view(aid, "⚠️ Ad dəyişmədi") if aid else yta_list_view())
 
 
+async def waiting_yta_link(message: Message) -> bool:
+    return (yta_inp.get("stage") in ("await_lname", "await_lurl") and bool(message.from_user)
+            and is_creator(message.from_user.id))
+
+
+async def yta_link_input(message: Message):
+    """🔘 Düymənin adı (ad dəyişmə) və ya öz linki (yeni düymə: ad linkdən götürülür, sonra ✏️ ilə dəyişilir)."""
+    from bot.core import yt_accounts as ya
+
+    aid, stage, idx = yta_inp.get("acc"), yta_inp.get("stage"), yta_inp.get("idx", -1)
+    yta_inp["stage"] = None
+    with contextlib.suppress(Exception):
+        await message.delete()
+    text = (message.text or "").strip()
+    try:
+        if stage == "await_lname":
+            if not ya.rename_link(aid, idx, text):
+                raise ValueError("ad dəyişmədi")
+            note = f"✏️ Ad: {escape(ya.clean_link_name(text))}"
+        else:
+            url = ya.normalize_url(text)
+            host = url.split("://", 1)[1].split("/", 1)[0].removeprefix("www.")
+            ya.add_link(aid, f"🔗 {host}", url)
+            note = f"➕ {escape(host)} əlavə olundu — ✏️ ilə öz adını ver"
+    except ValueError as e:
+        note = f"⚠️ {escape(str(e))}"
+    await yta_show(yta_links_view(aid, note))
+
+
 def register_youtube_handlers(router: Router):
     router.message.register(
         yt_batch_parallel_input,
@@ -802,6 +897,13 @@ def register_youtube_handlers(router: Router):
         F.chat.type == "private",
         F.document,
         waiting_yta_file,
+    )
+    router.message.register(
+        yta_link_input,
+        F.chat.type == "private",
+        F.text,
+        ~F.text.startswith("/"),
+        waiting_yta_link,
     )
     router.message.register(
         yta_name_input,

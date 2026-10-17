@@ -67,3 +67,6 @@ data/va_records/
 
 # Serverə göndərilən YouTube cookies ixracı (həssas)
 data/remote_cookies/
+
+# Əl ilə hazırlanmış layihə yedəkləri (GB-larla; GitHub qəbul etmir)
+dlm_backup*

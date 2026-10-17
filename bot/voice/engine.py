@@ -15,7 +15,7 @@ import time
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from html import escape
 
-from bot.core import audio_cache, cpu_pool, song_names as names
+from bot.core import audio_cache, cpu_pool, depo_shards, song_names as names
 from bot.core.links import _YOUTUBE_VID_RE as _VID_RE
 from bot.voice.calls_adapter import Calls, _LibLog, pytgcalls_version
 from bot.voice.models import (
@@ -1227,7 +1227,7 @@ class Assistant:
             ent = await client.get_input_entity(c["chat_id"])
         except Exception:
             ref = audio_cache.depo_yt_setting() if getattr(t, "source", "") == "youtube" else audio_cache.depo_setting()
-            ref = ref or audio_cache.depo_setting()
+            ref = depo_shards.ref_of(c["chat_id"]) or ref or audio_cache.depo_setting()      # əlavə kanalın postu — öz kanalı ilə
             ent = await client.get_input_entity(ref if not ref.lstrip("-").isdigit() else int(ref))
         msg = await client.get_messages(ent, ids=c["message_id"])
         if not msg or not msg.media:

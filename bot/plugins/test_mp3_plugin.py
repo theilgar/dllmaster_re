@@ -83,49 +83,6 @@ def is_plugin_enabled() -> bool:
     return True
 
 
-def is_allowed_user(user_id: int) -> bool:
-    return True
-
-
-def is_user_mp3_active(uid: int = None) -> bool:
-    return get_user_codec(uid) == "mp3"
-
-
-def set_user_mp3_active(active: bool, uid: int = None):
-    set_user_codec(uid, "mp3" if active else "m4a")
-
-
-def is_creator_mp3_active() -> bool:
-    cid = creator_id()
-    return get_user_codec(cid) == "mp3" if cid else False
-
-
-def set_creator_mp3_active(active: bool):
-    cid = creator_id()
-    if cid:
-        set_user_codec(cid, "mp3" if active else "m4a")
-
-
-def get_allowed_testers() -> list[tuple[int, str]]:
-    return []
-
-
-def get_allowed_user_ids() -> list[int]:
-    return []
-
-
-def add_allowed_user(user_id: int, user_title: str = ""):
-    pass
-
-
-def remove_allowed_user(user_id: int) -> str | None:
-    return None
-
-
-def clear_allowed_users():
-    pass
-
-
 # ───────────────────────── FFmpeg MP3 Konvertasiyası ─────────────────────────
 async def convert_to_mp3(src_path: str, dst_path: str, bitrate: int = 320,
                          title: str = None, performer: str = None) -> bool:
@@ -226,17 +183,6 @@ def codec_panel_view(user_id: int, chat_id: int = None, is_group: bool = False, 
     rows.append(nav_row)
 
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def admin_panel_view() -> tuple[str, InlineKeyboardMarkup]:
-    """Geriye uyğunluq: Creator üçün kodek paneli."""
-    cid = creator_id() or 0
-    return codec_panel_view(cid, from_menu=True)
-
-
-def user_panel_view(user_id: int, from_menu: bool = False) -> tuple[str, InlineKeyboardMarkup]:
-    """Geriye uyğunluq: İstifadəçi üçün kodek paneli."""
-    return codec_panel_view(user_id, from_menu=from_menu)
 
 
 # ───────────────────────── Musiqi Hook-u (Mp3TestHook / CodecHook) ─────────────────────────

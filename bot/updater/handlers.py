@@ -27,6 +27,7 @@ from bot.updater.git_client import (
     git,
     incoming_text,
     install_requirements,
+    MAX_FILE_MB,
     is_sensitive,
     pull_from_github,
     push_all,
@@ -55,6 +56,7 @@ from bot.updater.reports import (
     scan_files,
     status_kb,
 )
+from bot.updater import progress as push_progress
 from bot.updater import ssh_key
 from common.database import get_db
 from common.utilities import BASE_DIR, get_tz
@@ -395,7 +397,9 @@ def setup(context):
                 await set_report_kb(p, status_kb("⏳ GitHub-a göndərilir..."))
                 paths = p["files"].get("changed", []) + p["files"].get("added", []) + p["files"].get("removed", [])
                 try:
-                    res = await asyncio.to_thread(push_update, root, paths, p["message"])
+                    async def show_progress(frac, label):             # hesabatın altındakı düymədə bar (botun bar üslubu ilə)
+                        await set_report_kb(p, status_kb(push_progress.button_text(frac, label)))
+                    res = await push_progress.run_with_progress(show_progress, push_update, root, paths, p["message"])
                 except Exception as e:
                     logger.error(f"GitHub push xətası: {e}", exc_info=True)
                     res = {"ok": False, "committed": False, "error": redact(str(e)), "hint": ""}
@@ -409,6 +413,9 @@ def setup(context):
                         f"📁 Fayl: <b>{len(res['files'])}</b>"
                         + ("" if res["committed"] else " <i>(yeni commit lazım olmadı, yalnız push edildi)</i>"),
                     ]
+                    if res.get("oversize"):
+                        lines.append(f"🧱 {len(res['oversize'])} fayl çox böyük olduğu üçün (&gt; {int(MAX_FILE_MB)} MB) göndərilmədi: "
+                                     + ", ".join(f"<code>{escape(Path(x).name)}</code>" for x in res["oversize"][:3]))
                     if res.get("others"):
                         lines.append(f"ℹ️ <i>Repoda commit edilməmiş başqa {res['others']} dəyişiklik də var "
                                      "(hesabatda olmadığı üçün toxunulmadı).</i>")
@@ -542,7 +549,7 @@ def setup(context):
         if len(changes) > limit:
             lines.append(f"   <i>… və daha {len(changes) - limit} fayl</i>")
         if excluded:
-            lines.append(f"\n🔒 <b>Göndərilməyəcək (həssas):</b> {len(excluded)}")
+            lines.append(f"\n🔒 <b>Göndərilməyəcək (həssas və ya &gt; {int(MAX_FILE_MB)} MB):</b> {len(excluded)}")
             lines += [f"   🔒 <code>{escape(p)}</code>" for _, p in excluded[:10]]
         if skipped:
             lines.append(f"⏭ <i>Seçilmədiyi üçün göndərilməyəcək: {skipped} fayl</i>")
@@ -987,7 +994,9 @@ def setup(context):
             async with push_lock:
                 await edit_full_panel("⏳ <i>GitHub-a göndərilir...</i>", None)
                 try:
-                    res = await asyncio.to_thread(push_all, root, message, selected)
+                    async def show_progress(frac, label):             # bar + mərhələ, görünüş ayarına uyğun kod blokunda
+                        await edit_full_panel(push_progress.panel_text(frac, label), None)
+                    res = await push_progress.run_with_progress(show_progress, push_all, root, message, selected)
                 except Exception as e:
                     logger.error(f"Full push xətası: {e}", exc_info=True)
                     res = {"ok": False, "committed": False, "error": redact(str(e)), "hint": "", "excluded": []}
@@ -1012,6 +1021,10 @@ def setup(context):
                     lines.append(f"🚨 {len(res['sensitive_sent'])} həssas fayl da göndərildi")
                 if res.get("excluded"):
                     lines.append(f"🔒 {len(res['excluded'])} həssas fayl göndərilmədi")
+                big = list(dict.fromkeys(res.get("oversize", []) + res.get("oversize_skipped", [])))
+                if big:
+                    lines.append(f"🧱 {len(big)} fayl çox böyük olduğu üçün (&gt; {int(MAX_FILE_MB)} MB) göndərilmədi: "
+                                 + ", ".join(f"<code>{escape(Path(x).name)}</code>" for x in big[:3]))
                 other = res.get("skipped", 0) - len(res.get("excluded", []))
                 if other > 0:
                     lines.append(f"⏭ {other} fayl seçilmədiyi üçün lokalda qaldı")

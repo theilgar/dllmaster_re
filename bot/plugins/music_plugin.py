@@ -204,6 +204,10 @@ def youtube_fallback_meta(vid: str, artist: str, track: str, src: str):
     ym = getattr(yt_handler, "VIDEO_META", {}).get(vid) or {}
     if ym.get("artist") and ym.get("track"):
         return ym["artist"], ym["track"], "youtube-music"
+    # tərs sıra ("Ad - Artist"), "Ad | Artist", ayırıcısız başlıq: kanal adı ilə TƏSDİQLƏNƏNDƏ düzəlir
+    fixed = song_names.refine_with_channel(ym.get("title") or "", artist, track, ym.get("channel"))
+    if fixed != (artist, track):
+        return fixed[0], fixed[1], "youtube+kanal"
     if not artist or artist == "YouTube":
         channel = clean_channel(ym.get("channel"))
         if channel:

@@ -1069,14 +1069,6 @@ def thread_pool_stats() -> dict:
         return {"max": 0, "threads": 0, "active": 0, "idle": 0, "queued": 0, "submitted": 0, "done": 0, "failed": 0}
 
 
-def thread_pool_size() -> int:
-    try:
-        ex = getattr(asyncio.get_running_loop(), "_default_executor", None)
-        return getattr(ex, "_max_workers", 0) if ex else min(32, CORES + 4)
-    except RuntimeError:
-        return 0
-
-
 def ffmpeg_prefix() -> list:
     """ffmpeg-i aşağı prioritetlə işə salmaq üçün (bot donmasın)."""
     n = nice()

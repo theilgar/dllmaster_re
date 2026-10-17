@@ -8,9 +8,10 @@ from bot.depo.engine_countries import CountriesMixin
 from bot.depo.engine_failures import FailuresMixin
 from bot.depo.engine_queue import QueueMixin
 from bot.depo.engine_sync import SyncMixin
+from bot.depo.engine_ytm import YtmFeederMixin
 
 
-class Filler(FailuresMixin, SyncMixin, QueueMixin, CountriesMixin):
+class Filler(FailuresMixin, SyncMixin, QueueMixin, CountriesMixin, YtmFeederMixin):
     def __init__(self, context):
         self.ctx = context
         self.task = None
@@ -50,6 +51,7 @@ class Filler(FailuresMixin, SyncMixin, QueueMixin, CountriesMixin):
         self.removed = set()                    # depodan silinib — doldurucu yenidən yükləməsin (video_id)
         self.wake = asyncio.Event()             # ⚡ Məcburi davam — gözləyən bütün işçiləri dərhal oyadır
         self.last_progress = time.time()        # son uğurlu / keşdən keçən mahnı (ilişmə aşkarlanması)
+        self._ytm_par_init()
         self._init_resolve_table()
         self._init_fail_tables()
         self.load_state()
@@ -84,7 +86,7 @@ class Filler(FailuresMixin, SyncMixin, QueueMixin, CountriesMixin):
         return self._mode("workers_mode", "workers", DEFAULT_WORKERS)
 
     def set_mode(self, which: str, mode: str):
-        if which in ("delay", "workers") and mode in ("auto", "manual"):
+        if which in ("delay", "workers", "ytm_par") and mode in ("auto", "manual"):
             self._set(f"{which}_mode", mode)
             if which == "workers":
                 ensure_thread_pool(self.workers)
@@ -481,30 +483,6 @@ class Filler(FailuresMixin, SyncMixin, QueueMixin, CountriesMixin):
             if a and a not in ("YouTube", "Naməlum"):
                 names[a] = names.get(a, 0) + r[1]
         return sorted(names, key=names.get, reverse=True)[:40]
-
-    async def ytm_feeder(self):
-        """YT Music kataloqunu fonda gəzir — növbə azaldıqca növbəti ifaçını açır."""
-        while not self.stop_event.is_set():
-            if not self.ytm_on or not self.ytm:
-                await asyncio.sleep(10)
-                continue
-            low = max(YTM_LOW_WATER, self.workers * 4)
-            country_need = (bool(self.countries()) and len(self.country_queue) < low
-                            and self.ytm.has_prio_pending())
-            if len(self.ytm_queue) >= low and not country_need:   # çox işçi növbəni tez boşaldır
-                await asyncio.sleep(5)
-                continue
-            try:
-                ok = await self.ytm.step(self.ytm_add_items, self._user_artists, self.stop_event)
-                if not ok:
-                    await asyncio.sleep(3600)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                logger.warning(f"🎵 YT Music skaneri: {e}")
-                self.ytm.stats["note"] = f"xəta: {str(e)[:60]} — 1 dəq. sonra"
-                self.ytm.yt = None                     # sessiyanı yenilə
-                await asyncio.sleep(60)
 
     # ── 🧵 İşçilər ──
     async def loop(self):

@@ -448,11 +448,6 @@ def ub_group_flag(ub, chat_id, stream: str) -> bool:
     return ub.db.kv_get("logger", _gk(chat_id, f"on_{stream}")) is not None
 
 
-def group_has_overrides(ub, chat_id) -> bool:
-    return any(ub.db.kv_get("logger", _gk(chat_id, f"on_{s}")) is not None for s in ("au",) + TOGGLE_STREAMS) or \
-        any(has_group_target(ub, chat_id, s) for s in STREAM_INFO)
-
-
 def get_stream_target(ub, stream: str = "vc", chat_id=None) -> tuple[str | None, str | None, str]:
     """Hər axın üçün hədəfi qaytarır (qrupun öz hədəfi → fərdi → valideyn → ümumi fallback).
     chat_id verilsə, əvvəl həmin qrup üçün ayrıca təyin olunmuş hədəflər axtarılır."""
@@ -860,10 +855,6 @@ def _main_view(ub, cid: int, note: str):
         rows.append([("⏺ Qeyd paneli (botda)", "vp")])
     rows.append([("📤 Səs hədəfləri", "tgt"), ("📜 Jurnal", "jr:del"), ("❓ Kömək", "help")])
     return ff(ub.title("rec"), body, footer=".rec help — bütün komandalar"), rows
-
-
-def _tgt_btn(ub, stream: str, name: str):
-    return (f"{STREAM_INFO[stream]['icon']} {name}" + ("" if stream_on(ub, stream) else " 🔴"), f"t:cfg:{stream}")
 
 
 def _tgt_view(ub, cid: int, note: str):

@@ -121,6 +121,13 @@ def setup(context):
                     logger.debug(f"start göstərilmədi: {e}")
                 finally:
                     i18n.reset(tok)
+            kb_refresh = getattr(context, "menu_kb_refresh", None)       # ⌨️ klaviatura düymələri də yeni dildə olsun
+            if kb_refresh and cb.message.chat.type == "private":
+                tok = i18n.use(code)
+                try:
+                    await kb_refresh(cb.message.chat.id, cb.from_user.id)
+                finally:
+                    i18n.reset(tok)
             return
         await cb.answer()
 

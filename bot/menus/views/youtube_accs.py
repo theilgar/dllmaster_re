@@ -212,6 +212,9 @@ def yta_acc_view(acc_id: str, note: str = "") -> tuple[str, InlineKeyboardMarkup
         lines.append(
             "\n⚠️ <i>Google sessiyası bitib və ya hesaba giriş yoxdur. Rotasiyaya qaytarmaq üçün <b>🔐 Yenidən daxil ol</b> düyməsinə bas.</i>"
         )
+    if ya.can_open(a):
+        lines.append("\n🔘 <i>Aşağıdakı düymələrə basanda bu hesabın brauzer profili serverin ekranında açılır "
+                     "(məs. Gmail-ə baxmaq üçün).</i>")
     if note:
         lines.append(f"\n{note}")
     on = a.get("on", True)
@@ -249,6 +252,9 @@ def yta_acc_view(acc_id: str, note: str = "") -> tuple[str, InlineKeyboardMarkup
             cur = (ya.pinned(lane) or {}).get("id") == acc_id
             pr.append(panel.choice(f"📌 {ya.ROLES[role]}", cur, f"menu:yta:pin:{acc_id}:{role}"))
         rows.insert(2, pr)
+    if ya.can_open(a):                                  # 🔘 sahibin adlandırdığı düymələr — basanda profil serverdə açılır
+        rows += panel.grid([_btn(x["name"], f"yta:ol:{acc_id}:{i}") for i, x in enumerate(ya.links(a))], 2)
+        rows.append([_btn("🔘 Düymələri idarə et", f"yta:lk:{acc_id}")])
     r = [_btn("✏️ Adı dəyiş", f"yta:nm:{acc_id}")]
     if a["kind"] == "file":
         r.append(_btn("🔄 cookies.txt yenilə", f"yta:rf:{acc_id}"))
@@ -340,6 +346,35 @@ def yta_login_view(note: str = "") -> tuple[str, InlineKeyboardMarkup]:
         [_btn("📱 Öz cihazımla giriş", "yta:lo")],
         nav_row("yta"),
     ]
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def yta_links_view(acc_id: str, note: str = "") -> tuple[str, InlineKeyboardMarkup]:
+    """🔘 Hesabın düymələri: ad dəyiş / sil / hazır linklərdən və ya öz linkindən əlavə et."""
+    from bot.core import yt_accounts as ya
+
+    a = ya.get(acc_id)
+    if not a or not ya.can_open(a):
+        return yta_list_view("⚠️ Bu hesabın brauzer profili yoxdur — düymələr yalnız brauzer profilli hesablarda olur")
+    items = ya.links(a)
+    lines = [
+        crumb(SECTIONS["mus"], "🔑 YouTube hesabları", escape(a["name"]), "🔘 Düymələr"),
+        LINE,
+        f"Düymələr: <b>{len(items)}/{ya.MAX_LINKS}</b> — hesabın səhifəsində görünür; basanda profil serverin "
+        "ekranında həmin linklə açılır.",
+        "",
+    ]
+    lines += [f"{i + 1}. <b>{escape(x['name'])}</b> — <code>{escape(x['url'][:60])}</code>" for i, x in enumerate(items)] \
+        or ["<i>Düymə yoxdur — aşağıdan əlavə et.</i>"]
+    lines.append("\n<i>✏️ adı dəyişir · 🗑 silir. Əlavə edəndən sonra ✏️ ilə öz adını ver.</i>")
+    if note:
+        lines.append(f"\n{note}")
+    rows = [[_btn(f"✏️ {x['name']}", f"yta:ln:{acc_id}:{i}"), _btn("🗑", f"yta:ld:{acc_id}:{i}")]
+            for i, x in enumerate(items)]
+    if len(items) < ya.MAX_LINKS:
+        rows += panel.grid([_btn(f"➕ {label}", f"yta:la:{acc_id}:{key}") for key, (label, _) in ya.LINK_PRESETS.items()], 2)
+        rows.append([_btn("🔗 Öz linkim", f"yta:la:{acc_id}:own")])
+    rows.append(panel.nav(f"menu:yta:a:{acc_id}", escape(a["name"])[:20], close_data="menu:cancel"))
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
 
 

@@ -256,7 +256,7 @@ def project_storage_snapshot(force: bool = False) -> Dict[str, Any]:
 
     root = Path(BASE_DIR).resolve()
 
-    def _dir_stats(rel_path: str):
+    def _dir_stats(rel_path: str, exclude_dirs: tuple = ()):
         target = root / rel_path
         if not target.exists():
             return 0, 0, []
@@ -265,6 +265,9 @@ def project_storage_snapshot(force: bool = False) -> Dict[str, Any]:
         file_list = []
         for dirpath, dirnames, filenames in os.walk(target):
             if any(skip in dirpath for skip in ("__pycache__", ".git", ".venv")):
+                continue
+            rpath = os.path.relpath(dirpath, root)
+            if any(rpath == exc or rpath.startswith(exc + os.sep) for exc in exclude_dirs):
                 continue
             for f in filenames:
                 fp = os.path.join(dirpath, f)
@@ -277,21 +280,26 @@ def project_storage_snapshot(force: bool = False) -> Dict[str, Any]:
                     pass
         return total_size, total_files, file_list
 
+    data_sub_zones = ("data/records", "data/voice_cache", "data/backups", "data/yt_profiles")
+
     zones = [
-        ("bot_plugins", "🔌 Bot Pluginləri", "bot/plugins"),
-        ("ub_plugins",  "📱 Userbot Pluginləri", "userbot/plugins"),
-        ("bot_core",    "⚙️ Bot Core", "bot/core"),
-        ("ub_core",     "📱 Userbot Core", "userbot/core"),
-        ("common",      "🧩 Common (Ümumi)", "common"),
-        ("data",        "🗄 Məlumatlar & Bazalar", "data"),
-        ("download",    "⬇️ Yükləmələr & Keş", "download"),
-        ("assets",      "🖼 Aktivlər (Assets)", "bot/assets"),
+        ("records",     "⏺ Səs Qeydləri",       "data/records", ()),
+        ("voice_cache", "🎵 Yayım Səs Keşi",    "data/voice_cache", ()),
+        ("backups",     "💾 Baza Yedəkləri",    "data/backups", ()),
+        ("yt_profiles", "🌐 YT Brauzer Keşi",   "data/yt_profiles", ()),
+        ("data",        "🗄 Əsas Baza & Data",  "data", data_sub_zones),
+        ("download",    "⬇️ Yükləmələr & Keş", "download", ()),
+        ("bot_plugins", "🔌 Bot Pluginləri",    "bot/plugins", ()),
+        ("ub_plugins",  "📱 UB Pluginləri",     "userbot/plugins", ()),
+        ("bot_core",    "⚙️ Bot Core",          "bot/core", ()),
+        ("ub_core",     "📱 UB Core",           "userbot/core", ()),
+        ("common",      "🧩 Ümumi (Common)",    "common", ()),
     ]
 
     categories = []
     all_plugins = []
-    for key, label, rel_dir in zones:
-        sz, count, files = _dir_stats(rel_dir)
+    for key, label, rel_dir, exc in zones:
+        sz, count, files = _dir_stats(rel_dir, exclude_dirs=exc)
         categories.append({
             "key": key,
             "label": label,

@@ -81,7 +81,12 @@ async def _check_git(errors: list[str]) -> list[Update]:
     if not (ROOT / ".git").exists() or not shutil.which("git"):
         return []
     g = ("git", "-C", str(ROOT))
-    code, _ = await _run(*g, "fetch", "--quiet")
+    try:
+        from bot.updater.git_client import auth_args
+        auth = tuple(auth_args())                    # şəxsi repo: GitHub tokeni olmadan fetch «Authentication failed» verir
+    except Exception:
+        auth = ()
+    code, _ = await _run(*g, *auth, "fetch", "--quiet")
     if code != 0:
         errors.append("git fetch alınmadı")
         return []

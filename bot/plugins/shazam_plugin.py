@@ -63,16 +63,6 @@ def _get_pending(chat_id: int, message_id: int | None):
     return _PENDING_MEDIA.get((chat_id, message_id))
 
 
-async def _extract_audio_clip(input_path: str, output_path: str, duration_sec: int = 25) -> bool:
-    """ffmpeg ilə fayldan ilk ~25 saniyəlik MP3 parça (vaxt bitsə proses öldürülür — common.media)."""
-    from common.media import run_ffmpeg
-    rc, err = await run_ffmpeg("-i", input_path, "-ss", "0", "-t", str(duration_sec), "-vn",
-                               "-acodec", "libmp3lame", "-ar", "44100", "-ac", "2", output_path, timeout=20)
-    if rc != 0:
-        logger.warning(f"ffmpeg audio kəsmə xətası: {err[:200]}")
-    return os.path.exists(output_path) and os.path.getsize(output_path) > 1000
-
-
 def _remember(key: str, item: dict):
     _SHAZAM_CACHE[key] = item
     _SHAZAM_CACHE.move_to_end(key)

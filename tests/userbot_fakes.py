@@ -38,6 +38,7 @@ class FakeEvent:
         self.client, self._chat, self._reply, self._sender = client, chat, reply, sender
         self.chat_id, self.is_private, self.id, self.out = chat_id, private, msg_id, out
         self.is_reply = reply is not None
+        self.reply_to_msg_id = getattr(reply, "id", None)
         self.sender_id = getattr(sender, "id", None)
         self.pattern_match = None
         self.edits, self.deleted = [], False

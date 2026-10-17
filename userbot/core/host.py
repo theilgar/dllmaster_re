@@ -6,7 +6,7 @@ Hər komanda ayrıca fayldır → userbot/plugins/ qovluğunda. Bu host:
   1) UB reyestrini qurur,
   2) userbot/plugins/*.py fayllarının hər birini yükləyib register(ub) çağırır,
   3) userbot qoşulan kimi bütün komanda və xam handler-ləri client-ə bağlayır,
-  4) .menu / .help / .panel admin panelini reyestrdən (komandalar, help, bölmələr) qurur.
+  4) .menu (plugin idarəsi, userbot/core/plugin_menu.py) və .panel / .help (admin paneli) qurur.
 
 Yeni komanda əlavə etmək: userbot/plugins/ içində yeni .py faylı yarat, içində register(ub) yaz.
 Nümunə üçün userbot/plugins/_example.py.txt fayllarına bax.
@@ -21,7 +21,7 @@ import time
 from aiogram import F, types as ag_types
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, InlineQueryResultArticle, InputTextMessageContent
 
-from userbot.core.userbot_api import UB, ff, tr
+from userbot.core.userbot_api import UB, tr
 
 logger = logging.getLogger(__name__)
 
@@ -65,8 +65,13 @@ def load_command_plugins(ub) -> list:
     if not os.path.isdir(PLUGINS_DIR):
         logger.warning(f"⚠️ userbot/plugins qovluğu yoxdur: {PLUGINS_DIR}")
         return names
+    from userbot.core import plugin_menu
+    off = set(plugin_menu.disabled(ub)) - plugin_menu.PROTECTED
     for fn in sorted(os.listdir(PLUGINS_DIR)):
         if not fn.endswith(".py") or fn.startswith("_"):
+            continue
+        if fn[:-3] in off:
+            logger.info(f"⏸ Userbot plugini söndürülüb (.menu): {fn}")
             continue
         try:
             name, _ = load_plugin_file(ub, os.path.join(PLUGINS_DIR, fn), attach=False)
@@ -77,6 +82,7 @@ def load_command_plugins(ub) -> list:
 
 
 def setup(context):
+    from userbot.core import plugin_menu, plugin_style, userbot_restart
     dp = context.dp
     ub = UB(context)
     context.userbot = ub
@@ -103,31 +109,13 @@ def setup(context):
                 "Dublikatları birləşdirir, adlardakı tarix / zibili təmizləyir, YouTube adı ilə uyğun gəlməyənləri "
                 "düzəldir.\n\n<b>İstifadə (botda):</b> <code>/fix</code>", "bot")
 
-    # ───────────── 🛠 .menu — admin paneli (bot inline rejimi ilə) ─────────────
-    def plain(title: str) -> str:
-        """'💬 Hesab komandaları' → 'Hesab komandaları' (<pre> içində emoji hizanı pozur)."""
-        head, _, rest = title.partition(" ")
-        return rest if rest and not head[:1].isalnum() else title
-
-    def text_menu() -> str:
-        try:
-            from common.menu import build_unified_fastfetch_text
-            return build_unified_fastfetch_text(ub)
-        except Exception as _e:
-            logger.debug("udulan xəta [userbot/core/host.py text_menu]: %r", _e)
-            body = []
-            for key, cat in ub.ordered_cats():
-                keys = ub.help_keys(key)
-                if not keys:
-                    continue
-                body.append(f"# {plain(cat['title'])}")
-                body += [(ub.help[k][0], ub.help[k][1]) for k in keys]
-            return ff(ub.title("menu"), body, footer="mətn rejimi — bu çatda inline düymə göndərmək olmur")
-
-    async def on_menu(event):
+    # ───────────── 🧩 .menu / .help — userbot menyusu (userbot/core/plugin_menu.py, plugin_guide.py) ─────────────
+    async def open_panel(event, kind="pm"):
+        """kind: "pm" — userbot menyusu (.menu, .panel); "pg" — bələdçi (.help)."""
+        text_fallback = lambda: plugin_style.apply_text(ub.state["plugin_menu_text" if kind == "pm" else "plugin_guide_text"]())
         if getattr(ub, "is_inline_disabled", None) and ub.is_inline_disabled(event.chat_id):
             from userbot.core.userbot_api import safe_edit
-            await safe_edit(event, text_menu())
+            await safe_edit(event, text_fallback())
             return
 
         client = event.client
@@ -143,7 +131,7 @@ def setup(context):
         if len(ub.menus) > 200:
             ub.menus.pop(next(iter(ub.menus)))
         try:
-            results = await client.inline_query(await ub.bot_username(), f"ub:menu:{tok}",
+            results = await client.inline_query(await ub.bot_username(), f"ub:{kind}:{tok}",
                                                 entity=await event.get_input_chat())
             if not results:
                 raise RuntimeError("inline nəticə gəlmədi")
@@ -153,69 +141,40 @@ def setup(context):
             await event.delete()
         except Exception as e:
             from userbot.core.userbot_api import safe_edit
-            logger.info(f".menu inline alınmadı: {e}")
-            await safe_edit(event, text_menu())
+            logger.info(f".{kind} inline alınmadı: {e}")
+            await safe_edit(event, text_fallback())
 
-    # .menu komandasını reyestrə qoymaq əvəzinə birbaşa handler kimi əlavə edirik (paneli host idarə edir)
-    ub.commands.append({"name": "menu", "pattern": r"^\.(?:menu|help|panel)$", "outgoing": True, "fn": on_menu})
-    ub.add_help("menu", ".menu", "admin paneli",
-                "Bu admin panelini açır: bütün bölmələr və komandalar buradadır. <code>.help</code>, "
-                "<code>.panel</code> də eynidir.\n\n<b>İstifadə:</b> istənilən çatda <code>.menu</code>\n"
-                "💡 Kiməsə <b>reply edib</b> <code>.menu</code> yazsan, 👥 Bu çat bölməsində o şəxs üzrə "
-                "əlavə düymələr olur.\n<i>Botlar vasitəsilə göndərmə qadağan olan çatda sadə mətn göstərilir.</i>",
-                "acc")
+    async def on_menu(event):
+        await open_panel(event, "pm")
+
+    async def on_help(event):
+        await open_panel(event, "pg")
+
+    # komandaları reyestrə qoymaq əvəzinə birbaşa handler kimi əlavə edirik (panelləri host idarə edir)
+    ub.commands.append({"name": "menu", "pattern": r"^\.(?:menu|panel)$", "outgoing": True, "fn": on_menu})
+    ub.commands.append({"name": "help", "pattern": r"^\.help$", "outgoing": True, "fn": on_help})
+    ub.add_help("menu", ".menu", "userbot menyusu",
+                "Userbot-un idarə mərkəzi (botun /menu-sundan ayrıdır): 🧩 pluginləri söndür / yandır / yenilə / sil, "
+                "komandaları ayrıca söndür, ⚡ panelləri düymə ilə aç, ▶️ əmrləri işlət, 📖 bələdçi.\n\n"
+                "<b>İstifadə:</b> istənilən çatda <code>.menu</code> (<code>.panel</code> də eynidir)\n"
+                "<i>Botlar vasitəsilə göndərmə qadağan olan çatda sadə mətn göstərilir.</i>", "acc")
+    ub.add_help("help", ".help", "komanda bələdçisi",
+                "Bütün userbot komandalarının izahı: qruplar üzrə, hər komandanın istifadəsi və ▶️ işlət düyməsi.\n\n"
+                "<b>İstifadə:</b> <code>.help</code> (menyudan: 📖 Bələdçi)", "acc")
+
+    userbot_restart.setup(ub)                       # .restart — host komandası (söndürülə bilməz)
 
     # ───────────── panel görünüşləri ─────────────
     def Bt(tok, text, data):
         return InlineKeyboardButton(text=text, callback_data=f"ubm:{tok}:{data}"[:64])
 
     def main_view(tok):
-        from common.menu import unified_userbot_view
-        return unified_userbot_view(ub, tok)
-
-    # ── help bölməsi (reyestrdən) ──
-    def help_view(tok):
-        body, rows = [], []
-        for key, cat in ub.ordered_cats():
-            keys = ub.help_keys(key)
-            if not keys:
-                continue
-            body.append((plain(cat["title"]).split(" ")[0], f"{len(keys)} · {cat['sub']}"))
-            rows.append([Bt(tok, tr(cat["title"]), f"help:c:{key}")])
-        rows.append([Bt(tok, tr("⬅️ Menyu"), "main")])
-        return ff(ub.title("help"), body, footer=tr("bölmə seç, sonra komandaya bas")), \
-            InlineKeyboardMarkup(inline_keyboard=rows)
-
-    def help_cat_view(tok, cat_key):
-        cat = ub.help_cats.get(cat_key)
-        if not cat:
-            return help_view(tok)
-        keys = ub.help_keys(cat_key)
-        body = [f"# {plain(cat['title'])}"] + [(ub.help[k][0], ub.help[k][1]) for k in keys]
-        btns = [Bt(tok, ub.help[k][0], f"help:x:{k}") for k in keys]
-        rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
-        rows.append([Bt(tok, tr("⬅️ Help"), "help"), Bt(tok, tr("🏠 Menyu"), "main")])
-        return ff(ub.title("help"), body, footer=cat["sub"]), InlineKeyboardMarkup(inline_keyboard=rows)
-
-    def help_cmd_view(tok, k):
-        if k not in ub.help:
-            return help_view(tok)
-        button, short, long, category = ub.help[k]
-        cat = ub.help_cats.get(category, {})
-        head = ff(ub.title("help"), [(tr("Komanda"), button), (tr("Nədir"), short), (tr("Bölmə"), plain(cat.get("title", "—")))])
-        rows = [[Bt(tok, tr("⬅️ Bölmə"), f"help:c:{category}"), Bt(tok, tr("🏠 Menyu"), "main")]]
-        return f"{head}\n\n{long}", InlineKeyboardMarkup(inline_keyboard=rows)
+        return ub.state["plugin_menu_view"](tok)
 
     def cancel_ptask(tok):
         t = ub.ptasks.pop(tok, None)
         if t and not t.done():
             t.cancel()
-
-    from common.menu import ui_button_label
-    OVERVIEWS = {"aud": ("aud_overview_text", ()), "mus": ("music_overview_text", ()),
-                 "biz": ("biz_overview_text", ()), "com": ("com_overview_text", ()),
-                 "live": ("live_overview_text", ()),
-                 "sys": ("sys_overview_text", (("⚙️ Performans", "perf"), ("🗂 Yaddaş & Keş", "storage"), (ui_button_label, "ui")))}
 
     # ── bot tərəfi: inline sorğu və düymələr ──
     @dp.inline_query(F.query.startswith("ub:"))
@@ -232,18 +191,19 @@ def setup(context):
             if out is None:
                 await q.answer([], cache_time=0, is_personal=True)
                 return
+            card_text, card_kb = plugin_style.apply(out.text, out.kb())          # botun kod bloku görünüşü ilk mesajda da
             await q.answer([InlineQueryResultArticle(
                 id=f"ubcard_{tok}", title=tr("🧩 Userbot", uid=q.from_user.id), description=tr("komanda nəticəsi", uid=q.from_user.id),
-                input_message_content=InputTextMessageContent(message_text=out.text, parse_mode="HTML",
+                input_message_content=InputTextMessageContent(message_text=card_text, parse_mode="HTML",
                                                               disable_web_page_preview=True),
-                reply_markup=out.kb(),
+                reply_markup=card_kb,
             )], cache_time=0, is_personal=True)
             return
 
-        text, kb = main_view(tok)
+        text, kb = plugin_style.apply(*ub.state["plugin_menu_view"](tok, "g" if kind == "pg" else "main"))
         await q.answer([InlineQueryResultArticle(
-            id=f"ubmenu_{tok}", title=tr("🛠 Userbot admin paneli", uid=q.from_user.id),
-            description=tr("Status, sistem, çat, depo, help", uid=q.from_user.id),
+            id=f"ubmenu_{tok}", title=tr("🧩 Userbot menyusu", uid=q.from_user.id),
+            description=tr("Pluginlər, funksiyalar, əmrlər, bələdçi", uid=q.from_user.id),
             input_message_content=InputTextMessageContent(message_text=text, parse_mode="HTML"),
             reply_markup=kb,
         )], cache_time=0, is_personal=True)
@@ -318,19 +278,16 @@ def setup(context):
         view = ":".join([screen] + args)
         if view != "sys:live":                       # canlı rejim yalnız özü davam etsin
             cancel_ptask(tok)
+        plugin_menu.drop_panel(ub, tok)              # ▶️ Əmrlər-dən işləyən komanda dayansın
         ub.views[tok] = view
         if len(ub.views) > 300:
             ub.views.pop(next(iter(ub.views)))
 
         try:
-            if screen in ("bot", "bot_panel"):
-                await cb.answer()
-                from common.menu import main_text, main_kb
-                await ub.edit_panel(cb, main_text(context), main_kb(context))
-            elif screen == "main":
+            if screen == "main":
                 await cb.answer()
                 await ub.edit_panel(cb, *main_view(tok))
-            elif screen in ("storage", "storage_refresh", "storage_clean"):
+            elif screen in ("storage", "storage_refresh", "storage_clean", "storage_clean_records"):
                 await cb.answer()
                 from common.menu import storage_view
                 note = ""
@@ -340,42 +297,17 @@ def setup(context):
                     freed_b, freed_cnt = await cleanup_downloads()
                     await asyncio.to_thread(project_storage_snapshot, True)     # keşi yenilə
                     note = f"🧹 <b>Keş təmizləndi:</b> {freed_cnt} fayl ({freed_b / 1024 / 1024:.1f} MB)"
+                elif screen == "storage_clean_records":
+                    from common.diagnostics import project_storage_snapshot
+                    from common.utilities import cleanup_records
+                    freed_b, freed_cnt = await cleanup_records()
+                    await asyncio.to_thread(project_storage_snapshot, True)
+                    note = f"🎙 <b>Səs qeydləri təmizləndi:</b> {freed_cnt} fayl ({freed_b / 1024 / 1024:.1f} MB)" if freed_cnt else "ℹ️ Qeyd tapılmadı"
                 t, _ = storage_view(note=note)
                 k_rows = [
                     [Bt(tok, "🔄 Yenilə", "storage_refresh"), Bt(tok, "🧹 Keşi Təmizlə", "storage_clean")],
+                    [Bt(tok, "🎙 Qeydləri Təmizlə", "storage_clean_records")],
                     [Bt(tok, "⬅️ Menyu", "main")]
-                ]
-                await ub.edit_panel(cb, t, InlineKeyboardMarkup(inline_keyboard=k_rows))
-            elif screen in ("ui", "ui_refresh", "ui_style", "ui_bar"):
-                await cb.answer()
-                from common.menu import (
-                    get_ui_style, cycle_ui_style, UI_STYLE_LABELS, UI_STYLE_DESCS,
-                    get_ui_bar, cycle_ui_bar, UI_BAR_LABELS, UI_BAR_DESCS,
-                    render_card, format_table, _bar_box
-                )
-                if screen == "ui_style":
-                    cycle_ui_style()
-                elif screen == "ui_bar":
-                    cycle_ui_bar()
-                st = get_ui_style()
-                bar = get_ui_bar()
-                head = "📋 <b>Görünüş & İnterfeys Tənzimləmələri</b>"
-                t_rows = [
-                    ("STY", st.upper(), f"üslub: {UI_STYLE_LABELS[st]}"),
-                    ("BAR", _bar_box(0.5, 10), f"bar: {UI_BAR_LABELS[bar]}"),
-                ]
-                card_lines = [
-                    "Rejim: 🟢 aktiv · vahid interfeys",
-                    "──────────────────────────────────────",
-                    "BÖLMƏ  STAT/BAR        MƏLUMAT",
-                    "─────  ─────────────── ────────────────",
-                ] + format_table(t_rows)
-                legend = f"{UI_STYLE_DESCS[st]}\n{UI_BAR_DESCS[bar]}"
-                t = render_card(head, card_lines, legend)
-                k_rows = [
-                    [Bt(tok, f"🎨 {UI_STYLE_LABELS[st]}", "ui_style"),
-                     Bt(tok, f"{UI_BAR_LABELS[bar]}", "ui_bar")],
-                    [Bt(tok, "🔄 Yenilə", "ui_refresh"), Bt(tok, "⬅️ Menyu", "main")]
                 ]
                 await ub.edit_panel(cb, t, InlineKeyboardMarkup(inline_keyboard=k_rows))
             elif screen in ("perf", "perf_refresh", "perf_scale", "perf_t_auto", "perf_t_l1", "perf_c_l1", "perf_t_rd", "perf_c_rd", "perf_t_sc", "perf_t_pdl",
@@ -447,20 +379,9 @@ def setup(context):
                     [Bt(tok, "⬅️ Menyu", "main")]
                 ])
                 await ub.edit_panel(cb, t, InlineKeyboardMarkup(inline_keyboard=k_rows))
-            elif screen in OVERVIEWS:                     # bot bölmələrinin canlı icmalı (yalnız oxu)
+            elif screen == "help":                       # köhnə düymələr → yeni bələdçi
                 await cb.answer()
-                fn_name, extra = OVERVIEWS[screen]
-                import common.menu as cm
-                rows = [[Bt(tok, label() if callable(label) else label, key)] for label, key in extra] + [[Bt(tok, "⬅️ Menyu", "main")]]
-                await ub.edit_panel(cb, getattr(cm, fn_name)(context), InlineKeyboardMarkup(inline_keyboard=rows))
-            elif screen == "help":
-                await cb.answer()
-                if args[:1] == ["c"] and len(args) > 1:
-                    await ub.edit_panel(cb, *help_cat_view(tok, args[1]))
-                elif args[:1] == ["x"] and len(args) > 1:
-                    await ub.edit_panel(cb, *help_cmd_view(tok, args[1]))
-                else:
-                    await ub.edit_panel(cb, *help_view(tok))
+                await ub.edit_panel(cb, *ub.state["plugin_menu_view"](tok, "g"))
             elif screen == "close":
                 await cb.answer(tr("Bağlandı", uid=cb.from_user.id))
                 cancel_ptask(tok)
@@ -500,6 +421,7 @@ def setup(context):
     ub.state["Bt"] = Bt
     ub.state["plugins_dir"] = PLUGINS_DIR
     ub.state["load_plugin_file"] = lambda path, attach=True: load_plugin_file(ub, path, attach)
+    plugin_menu.setup(ub, dp)
 
     # ───────────── userbot-a qoşulma ─────────────
     async def attach():
@@ -516,6 +438,7 @@ def setup(context):
         ub.attach_pending()
         cmds = " ".join("." + c["name"] for c in ub.commands)
         logger.info(f"✅ Userbot komandaları qoşuldu: {cmds}")
+        asyncio.create_task(userbot_restart.announce(ub))     # .restart-dan sonra "yenidən başladı" mesajı
 
     try:
         ub.state["attach_task"] = asyncio.create_task(attach())

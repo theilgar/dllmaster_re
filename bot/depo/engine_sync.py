@@ -1,7 +1,13 @@
 """
 🧹 bot/depo/engine_sync.py - Filler: depo sinxronu, dublikat və novid təmizliyi (engine.py-dən ayrılıb).
 """
+from bot.core import depo_shards
 from bot.depo.engine_common import *  # noqa: F401,F403
+
+
+def post_key(chat, mid, primary) -> int:
+    """Postun yeganə açarı: əsas depoda mid-in özü, əlavə kanalda chat-a bağlı (mid-lər kanallar arası toqquşur)."""
+    return mid if chat in (None, primary) else chat * 10 ** 10 + mid
 
 
 class SyncMixin:
@@ -11,7 +17,23 @@ class SyncMixin:
         db = get_db()
         return db.cache_depo_mids(depo_id, checked_before=checked_before, limit=limit)
 
-    async def _active_tg_workers(self, depo_id) -> list:
+    async def _depo_targets(self) -> list:
+        """[(chat_id, ref)] — əsas depo (həmişə birinci) və əlavə kanallar (bot/core/depo_shards.py)."""
+        bot = self.ctx.bot
+        out = []
+        main = await audio_cache.depo_chat_id(bot)
+        if main:
+            out.append((main, audio_cache.depo_setting()))
+        for e in depo_shards.extras():
+            cid = await depo_shards.resolve(bot, e["ref"])
+            if cid and all(cid != c for c, _ in out):
+                out.append((cid, e["ref"]))
+        return out
+
+    def post_key_of(self, post: dict, primary) -> int:
+        return post_key(post.get("chat"), post["mid"], primary)
+
+    async def _active_tg_workers(self, depo_id, ref=None) -> list:
         """Aktiv olan bütün userbot client-lərini və onların depo kanalı entity-lərini qaytarır:
         [(label, client, entity), ...]"""
         workers = []
@@ -19,7 +41,7 @@ class SyncMixin:
         # 1. Əsas userbot
         if self.tg and await self.tg.ok():
             try:
-                ent = await self._depo_entity(depo_id, client=self.tg.client)
+                ent = await self._depo_entity(depo_id, client=self.tg.client, ref=ref)
                 workers.append(("1️⃣ Əsas userbot", self.tg.client, ent))
             except Exception as e:
                 logger.warning(f"1-ci userbot depo entity xətası: {e}")
@@ -33,17 +55,17 @@ class SyncMixin:
                     if any(c is w[1] for w in workers):
                         continue
                     try:
-                        ent2 = await self._depo_entity(depo_id, client=c)
+                        ent2 = await self._depo_entity(depo_id, client=c, ref=ref)
                         workers.append((f"{len(workers)+1}️⃣ {sl.name()}", c, ent2))
                     except Exception as e:
                         logger.debug(f"{sl.name()} depo entity alına bilmədi: {e}")
         return workers
 
-    async def _depo_entity(self, depo_id, client=None):
+    async def _depo_entity(self, depo_id, client=None, ref=None):
         c = client or (self.tg.client if self.tg else None)
         if not c:
             raise RuntimeError("userbot client yoxdur")
-        ref = audio_cache.depo_setting()
+        ref = str(ref) if ref else audio_cache.depo_setting()
         target = ({"type": "id", "id": int(ref)} if ref.lstrip("-").isdigit()
                   else {"type": "user", "name": ref.lstrip("@").split("/")[-1]})
         try:
@@ -58,19 +80,55 @@ class SyncMixin:
             raise RuntimeError(f"userbot başqa çat açdı ({tl_utils.get_peer_id(ent)} ≠ {depo_id})")
         return ent
 
+    @staticmethod
+    def _merge_sync(agg: dict, parts: list) -> dict:
+        """Kanal-kanal nəticələrdən ümumi görünüş (proqres və yekun): say cəmlənir, "missing" birləşir."""
+        return {**agg, "total": sum(p["total"] for p in parts), "checked": sum(p["checked"] for p in parts),
+                "missing": [m for p in parts for m in p["missing"]], "unknown": sum(p["unknown"] for p in parts),
+                "stopped": agg["stopped"] or any(p["stopped"] for p in parts), "parts": agg["parts"],
+                "method": f"{parts[0].get('method', 'userbot')} · {len(agg['parts'])} kanal" if parts else ""}
+
     async def sync_scan(self, progress=None, should_stop=lambda: False, allow_bot=True,
                         mode: str = "quick", cutoff_days: int = 7) -> dict:
-        """Bazadakı depo postlarının həqiqətən kanalda olub-olmadığını yoxlayır (heç nə silmir)."""
-        bot = self.ctx.bot
-        depo_id = await audio_cache.depo_chat_id(bot)
-        if not depo_id:
+        """Bazadakı depo postlarının həqiqətən kanalda olub-olmadığını yoxlayır (heç nə silmir).
+        Əlavə kanal (shard) varsa hər biri ayrıca yoxlanılır; nəticədə "parts" — kanal-kanal nəticələr."""
+        targets = await self._depo_targets()
+        if not targets:
             raise RuntimeError("depo kanalı əlçatan deyil")
+        if len(targets) == 1:
+            return await self._sync_scan_one(targets[0][0], targets[0][1], progress, should_stop, allow_bot, mode,
+                                             cutoff_days)
+        parts, errors = [], []
+        agg = {"depo_id": targets[0][0], "started": time.time(), "stopped": False, "parts": parts, "errors": errors}
+        for n, (cid, ref) in enumerate(targets):
+            if should_stop():
+                agg["stopped"] = True
+                break
 
+            async def sub(st, _done=list(parts)):
+                if progress:
+                    await progress(self._merge_sync(agg, _done + [st]))
+            try:
+                part = await self._sync_scan_one(cid, ref, sub, should_stop, allow_bot, mode, cutoff_days)
+            except Exception as e:
+                if n == 0:
+                    raise                                       # əsas depo alınmadısa — əvvəlki kimi xəta
+                logger.warning(f"🧹 Sinxron: {ref} kanalı yoxlanmadı: {e}")
+                errors.append(f"{ref}: {str(e)[:100]}")
+                continue
+            parts.append(part)
+            if part["stopped"]:
+                break
+        return self._merge_sync(agg, parts)
+
+    async def _sync_scan_one(self, depo_id, ref, progress=None, should_stop=lambda: False, allow_bot=True,
+                             mode: str = "quick", cutoff_days: int = 7) -> dict:
+        bot = self.ctx.bot
         db = get_db()
         now = int(time.time())
         cutoff = now - (cutoff_days * 86400) if cutoff_days else None
 
-        workers = await self._active_tg_workers(depo_id)
+        workers = await self._active_tg_workers(depo_id, ref)
         if workers:
             n_ub = len(workers)
             # 1) Tez rejim: yalnız yeni və ya son cutoff_days gündə yoxlanmamış postlar
@@ -81,7 +139,7 @@ class SyncMixin:
                 # Əgər yoxlanılmalı postlar azdırsa (<= 5000 * n_ub): sürətli paralel batch get_messages
                 if total_to_check <= 5000 * n_ub:
                     method_name = f"{n_ub} userbot (paralel tez)" if n_ub > 1 else "userbot (tez)"
-                    st = {"depo_id": depo_id, "total": total_to_check, "checked": 0, "missing": [],
+                    st = {"depo_id": depo_id, "ref": ref, "total": total_to_check, "checked": 0, "missing": [],
                           "unknown": 0, "method": method_name, "stopped": False, "started": time.time()}
                     if not ids:
                         return st
@@ -139,7 +197,7 @@ class SyncMixin:
             # 2) Tam rejim və ya çoxlu yoxlanmamış post olduqda: Telethon sürətli musiqi axını
             all_ids = set(await asyncio.to_thread(self._depo_msg_ids, depo_id))
             method_name = f"{n_ub} userbot (paralel axın)" if n_ub > 1 else "userbot (axın)"
-            st = {"depo_id": depo_id, "total": len(all_ids), "checked": 0, "missing": [],
+            st = {"depo_id": depo_id, "ref": ref, "total": len(all_ids), "checked": 0, "missing": [],
                   "unknown": 0, "method": method_name, "stopped": False, "started": time.time()}
 
             channel_mids = set()
@@ -270,7 +328,7 @@ class SyncMixin:
         else:
             ids = await asyncio.to_thread(self._depo_msg_ids, depo_id)
 
-        st = {"depo_id": depo_id, "total": len(ids), "checked": 0, "missing": [], "unknown": 0,
+        st = {"depo_id": depo_id, "ref": ref, "total": len(ids), "checked": 0, "missing": [], "unknown": 0,
               "method": "bot", "stopped": False, "started": time.time()}
 
         confirmed_bot = []
@@ -306,19 +364,60 @@ class SyncMixin:
         return st
 
     # ── 🧬 Depo indeksi: kanal ↔ baza tam uyğunlaşdırma və dublikatlar ──
+    def _merge_dedupe(self, parts: list, errors: list, stopped: bool) -> dict:
+        """Kanal-kanal indeks nəticələrindən ümumi görünüş. Dublikat axtarışı HƏR KANALDA ayrıca gedir
+        (kanallar arası heç nə silinmir); "dups" açarları post_key ilə birləşdirilir."""
+        primary = parts[0]["depo_id"]
+        dups = {}
+        for p in parts:
+            for d, c in p["dups"].items():
+                dups[post_key(p["depo_id"], d, primary)] = post_key(p["depo_id"], c, primary)
+        total = lambda k: sum(p[k] for p in parts)       # noqa: E731
+        return {"depo_id": primary, "parts": parts, "errors": errors, "stopped": stopped or any(p["stopped"] for p in parts),
+                "method": f"{parts[0].get('method', 'userbot')} · {len(parts)} kanal",
+                "started": min(p["started"] for p in parts), "scanned": total("scanned"),
+                "posts": [x for p in parts for x in p["posts"]], "novid_posts": [x for p in parts for x in p["novid_posts"]],
+                "orphans": [x for p in parts for x in p["orphans"]], "dups": dups,
+                "total": total("total"), "in_db": total("in_db"), "novid": total("novid"),
+                "same_vid": total("same_vid"), "same_song": total("same_song"), "repoint": total("repoint"),
+                "missing_db": total("missing_db"), "samples": [x for p in parts for x in p["samples"]][:6]}
+
     async def dedupe_scan(self, progress=None, should_stop=lambda: False) -> dict:
-        """Depo kanalının BÜTÜN audio postlarını userbot ilə oxuyur (heç nə dəyişmir)."""
-        bot = self.ctx.bot
-        depo_id = await audio_cache.depo_chat_id(bot)
-        if not depo_id:
+        """Depo kanallarının BÜTÜN audio postlarını userbot ilə oxuyur (heç nə dəyişmir)."""
+        targets = await self._depo_targets()
+        if not targets:
             raise RuntimeError("depo kanalı əlçatan deyil")
-        workers = await self._active_tg_workers(depo_id)
+        if len(targets) == 1:
+            return await self._dedupe_scan_one(targets[0][0], targets[0][1], progress, should_stop)
+        parts, errors = [], []
+        for n, (cid, ref) in enumerate(targets):
+            if should_stop():
+                break
+
+            async def sub(st, _scanned=sum(p["scanned"] for p in parts)):
+                if progress:
+                    await progress({**st, "scanned": _scanned + st["scanned"]})
+            try:
+                part = await self._dedupe_scan_one(cid, ref, sub, should_stop)
+            except Exception as e:
+                if n == 0:
+                    raise
+                logger.warning(f"🧬 Dublikat yoxlaması: {ref} kanalı oxunmadı: {e}")
+                errors.append(f"{ref}: {str(e)[:100]}")
+                continue
+            parts.append(part)
+            if part["stopped"]:
+                break
+        return self._merge_dedupe(parts, errors, stopped=should_stop())
+
+    async def _dedupe_scan_one(self, depo_id, ref, progress=None, should_stop=lambda: False) -> dict:
+        workers = await self._active_tg_workers(depo_id, ref)
         if not workers:
             raise RuntimeError("userbot aktiv deyil — kanal tarixçəsini yalnız userbot oxuya bilər")
 
         n_ub = len(workers)
         method_name = f"{n_ub} userbot (paralel axın)" if n_ub > 1 else "userbot"
-        posts, st = [], {"depo_id": depo_id, "scanned": 0, "stopped": False, "method": method_name, "started": time.time()}
+        posts, st = [], {"depo_id": depo_id, "ref": ref, "scanned": 0, "stopped": False, "method": method_name, "started": time.time()}
         posts_lock = asyncio.Lock()
 
         def make_post(m):
@@ -326,7 +425,7 @@ class SyncMixin:
             if doc is None:
                 return None
             a = next((x for x in doc.attributes if isinstance(x, DocumentAttributeAudio)), None)
-            return {"mid": m.id, "vid": _post_vid(m), "performer": (a.performer if a else "") or "",
+            return {"mid": m.id, "chat": depo_id, "vid": _post_vid(m), "performer": (a.performer if a else "") or "",
                     "title": (a.title if a else "") or "", "duration": int(a.duration or 0) if a else 0,
                     "size": getattr(doc, "size", 0) or 0}
 
@@ -494,7 +593,23 @@ class SyncMixin:
 
     def dedupe_link(self, st: dict) -> dict:
         """Dəyişmədən (heç nə silmədən): bazada olmayan postları bazaya yazır, dublikat postlara baxan
-        sətirləri kanonik posta yönəldir. Bundan sonra bu mahnılar heç vaxt yenidən yüklənmir."""
+        sətirləri kanonik posta yönəldir. Bundan sonra bu mahnılar heç vaxt yenidən yüklənmir.
+        Çox kanallı nəticədə ("parts") hər kanal öz daxilində işlənir."""
+        parts = st.get("parts") or [st]
+        linked = repointed = 0
+        for p in parts:
+            l, r = self._dedupe_link_one(p)
+            linked += l
+            repointed += r
+        audio_cache.mark_dirty()
+        ndups = sum(len(p["dups"]) for p in parts)
+        self._set("last_dedupe", json.dumps({"ts": time.time(), "linked": linked, "repointed": repointed,
+                                             "dups": ndups}))
+        logger.info(f"🧬 Depo indeksi: {linked} video bazaya bağlandı, {repointed} sətir kanonik posta yönəldi"
+                    + (f" ({len(parts)} kanal)" if len(parts) > 1 else ""))
+        return {"linked": linked, "repointed": repointed}
+
+    def _dedupe_link_one(self, st: dict) -> tuple:
         depo_id = st["depo_id"]
         posts = {p["mid"]: p for p in st["posts"]}
         db = get_db()
@@ -537,11 +652,7 @@ class SyncMixin:
                 db.cache_put(p["vid"], t["file_id"], t["unique_id"], t["title"], t["performer"], t["duration"],
                              t["size"], depo_id, cmid)
                 linked += 1
-        audio_cache.mark_dirty()
-        self._set("last_dedupe", json.dumps({"ts": time.time(), "linked": linked, "repointed": repointed,
-                                             "dups": len(dups)}))
-        logger.info(f"🧬 Depo indeksi: {linked} video bazaya bağlandı, {repointed} sətir kanonik posta yönəldi")
-        return {"linked": linked, "repointed": repointed}
+        return linked, repointed
 
     async def match_novid(self, posts: list, progress=None, should_stop=lambda: False,
                           concurrency: int = 3) -> dict:
@@ -599,16 +710,30 @@ class SyncMixin:
         """match_novid-in tapdıqlarını bazaya yazır (dedupe_link ilə eyni mexanizm, heç nə silinmir)."""
         if not matched:
             return 0
-        r = self.dedupe_link({"depo_id": depo_id, "posts": matched, "orphans": matched, "dups": {}})
-        return r["linked"]
+        by_chat = {}
+        for p in matched:
+            by_chat.setdefault(p.get("chat") or depo_id, []).append(p)
+        return sum(self.dedupe_link({"depo_id": cid, "posts": ps, "orphans": ps, "dups": {}})["linked"]
+                   for cid, ps in by_chat.items())
 
     async def dedupe_delete(self, st: dict, progress=None) -> int:
         """Dublikat postları depodan silir (əvvəl dedupe_link çağırılmalıdır — baza artıq kanoniklərə baxır)."""
+        parts = st.get("parts") or [st]
+        grand = sum(len(p["dups"]) for p in parts)
+        done = 0
+        for p in parts:
+            async def prog(d, t, _base=done):
+                if progress:
+                    await progress(_base + d, grand)
+            done += await self._dedupe_delete_one(p, prog)
+        return done
+
+    async def _dedupe_delete_one(self, st: dict, progress=None) -> int:
         mids = sorted(st["dups"])
         if not mids:
             return 0
         depo_id, deleted = st["depo_id"], 0
-        ent = await self._depo_entity(depo_id) if self.tg and await self.tg.ok() else None
+        ent = await self._depo_entity(depo_id, ref=st.get("ref")) if self.tg and await self.tg.ok() else None
         for i in range(0, len(mids), 100):
             chunk = mids[i:i + 100]
             try:
@@ -644,7 +769,23 @@ class SyncMixin:
         logger.info(f"🧬 Depodan {deleted} dublikat post silindi")
         return deleted
 
-    def sync_apply(self, depo_id, missing, block: bool = True) -> dict:
+    def sync_apply_all(self, st: dict, block: bool = True) -> dict:
+        """sync_scan nəticəsini tətbiq edir: çox kanallı olanda hər kanalın "missing"-i öz chat_id-sinə görə silinir."""
+        parts = st.get("parts")
+        if not parts:
+            return self.sync_apply(st["depo_id"], st["missing"], block)
+        total = {"posts": 0, "rows": 0, "songs": 0, "blocked": block}
+        removed = []
+        for p in parts:
+            if p["missing"]:
+                r = self.sync_apply(p["depo_id"], p["missing"], block, record=False)
+                removed += r.pop("removed")
+                for k in ("posts", "rows", "songs"):
+                    total[k] += r[k]
+        self._set("last_removed", json.dumps(removed[:5000]))
+        return total
+
+    def sync_apply(self, depo_id, missing, block: bool = True, record: bool = True) -> dict:
         """Kanalda olmayan postların bütün sətirlərini bazadan silir (sinxron — to_thread ilə çağır)."""
         missing = list(missing)
         db = get_db()
@@ -674,8 +815,10 @@ class SyncMixin:
             for fid, (cid, mid, _) in list(pool.foreign.items()):
                 if cid == depo_id and mid in gone:
                     pool.foreign.pop(fid, None)
-        self._set("last_removed", json.dumps(removed[:5000]))
-        return {"posts": len(missing), "rows": rows_n, "songs": len(removed), "blocked": block}
+        if record:
+            self._set("last_removed", json.dumps(removed[:5000]))
+        return {"posts": len(missing), "rows": rows_n, "songs": len(removed), "blocked": block,
+                **({} if record else {"removed": removed})}
 
     def unblock_last(self) -> int:
         """Son sinxronizasiyada silinənləri blokdan çıxarıb növbənin önünə qoyur."""

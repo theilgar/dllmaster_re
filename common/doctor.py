@@ -175,14 +175,6 @@ def summary(checks: list) -> tuple:
     return fails, warns
 
 
-def worst(checks: list) -> str:
-    if any(c.status == "fail" for c in checks):
-        return "fail"
-    if any(c.status == "warn" for c in checks):
-        return "warn"
-    return "ok"
-
-
 def log_report(checks: list, logger) -> None:
     fails, warns = summary(checks)
     for c in checks:

@@ -136,10 +136,6 @@ def _maint_on() -> bool:
     return bool(_safe(_maint_active, False))
 
 
-def _ui_label() -> str:
-    return ui_button_label()
-
-
 def sys_text() -> str:
     return sys_overview_text(get_context())
 
@@ -158,6 +154,7 @@ def sys_kb() -> InlineKeyboardMarkup:
                     text=lbl("proxy_label", "🌐 Proxy / Tor"), callback_data="px:panel"
                 ),
             ],
+            [InlineKeyboardButton(text="⌨️ Menyu düymələri", callback_data="mbtn:panel")],
             nav_row("main"),
         ]
     )

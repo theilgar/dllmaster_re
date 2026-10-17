@@ -56,6 +56,7 @@ Panel bölməsi (sctx — SectionCtx):
   await sctx.client(), await sctx.chat() — userbot client / bölmənin bağlı olduğu çat
 """
 import asyncio
+import functools
 import getpass
 import glob
 import logging
@@ -173,7 +174,22 @@ def mention(user) -> str:
     return escape(name)
 
 
+QUIET = {}      # (chat_id, mesaj id) → vaxt: .menu-da "cavabı gizlət" seçilmiş komandanın mesajları (plugin_menu.quiet_start)
+
+
+def quiet_key(obj):
+    cid, mid = getattr(obj, "chat_id", None), getattr(obj, "id", None)
+    return (cid, mid) if isinstance(cid, int) and isinstance(mid, int) and mid else None
+
+
+def is_quiet(obj) -> bool:
+    key = quiet_key(obj)
+    return key is not None and key in QUIET
+
+
 async def safe_edit(event_or_msg, text: str):
+    if is_quiet(event_or_msg):                       # gizlədilmiş komanda — status / nəticə mətni göstərilmir
+        return None
     try:
         return await event_or_msg.edit(text, parse_mode="html", link_preview=False)
     except MessageNotModifiedError:
@@ -801,7 +817,10 @@ class Out:
         self.chat_id = event.chat_id
         self.tok = os.urandom(4).hex()
         self.want_inline = inline
-        if self.want_inline and getattr(self.ub, "is_inline_disabled", None) and self.ub.is_inline_disabled(self.chat_id):
+        self.quiet = is_quiet(event)                    # cavabı gizlədilmiş komanda — kart açılmır
+        self.panel = getattr(event, "panel", None)      # .menu → ▶️ Əmrlər: nəticə menyunun öz mesajında (userbot/core/plugin_menu.py)
+        if self.want_inline and not self.panel and getattr(self.ub, "is_inline_disabled", None) \
+                and self.ub.is_inline_disabled(self.chat_id):
             self.want_inline = False
         self.mode = "text"              # "inline" | "text"
         self.msg = event                # mətn rejimində redaktə olunan mesaj
@@ -817,6 +836,10 @@ class Out:
         self.closed = False
         self._last = 0.0
         self._lock = asyncio.Lock()
+        if self.panel:                  # kart yenisi göndərilmir — menyu mesajının özü kart olur
+            self.mode, self.iid = "inline", self.panel.iid
+            self.iid_ready.set()
+            self.panel.outs.append(self)
 
     # ── düymələr ──
     def btn(self, text, action):
@@ -840,6 +863,8 @@ class Out:
         sysrow = [self.btn(self.tr("🔄 Yenilə"), "r")]
         if self.running():
             sysrow.append(self.btn(self.tr("⏹ Dayandır"), "s"))
+        if self.panel:                  # ✖️ əvəzinə menyuya qayıdış: 📖 İzah / ⬅️ Əmrlər / 🏠 / ✖️
+            return InlineKeyboardMarkup(inline_keyboard=[*rows, sysrow, *self.panel.nav_rows()])
         sysrow.append(self.btn(self.tr("✖️ Bağla"), "x"))
         rows.append(sysrow)
         return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -859,9 +884,17 @@ class Out:
     # ── açmaq ──
     async def open(self, text, rows=None):
         self.text, self.rows = text, rows or []
+        if self.quiet and not self.panel:
+            self.closed = True
+            return self
         self.ub.cards[self.tok] = self
         while len(self.ub.cards) > CARD_LIMIT:
             self.ub.cards.pop(next(iter(self.ub.cards)))
+        if self.panel:
+            self.panel.shown = True
+            await self._bot_edit()
+            self._last = time.monotonic()
+            return self
         if self.want_inline and await self._open_inline():
             self._last = time.monotonic()
             return self
@@ -948,6 +981,8 @@ class Out:
             self.closed = True
 
     async def _bot_edit(self):
+        if self.panel and self.panel.dead:               # istifadəçi başqa səhifəyə keçib — köhnə iş üstündən yazmasın
+            return
         for _ in range(3):
             try:
                 await self.ub.bot.edit_message_text(inline_message_id=self.iid, text=self.text, parse_mode="HTML",
@@ -973,6 +1008,8 @@ class Out:
         if cancel and self.running() and self.task is not asyncio.current_task():
             self.task.cancel()
         self.ub.cards.pop(self.tok, None)
+        if self.panel:                  # menyu mesajı silinmir — yalnız bu kartın işi dayanır
+            return
         try:
             if self.mode == "inline" and self.sent is not None:
                 await self.client.delete_messages(self.chat_id, [self.sent.id])
@@ -1242,13 +1279,52 @@ class UB:
     def command(self, name, pattern=None, outgoing=True, help=None, category="acc"):
         def deco(fn):
             pat = pattern if pattern is not None else rf"^\.{name}$"
-            self.commands.append({"name": name, "pattern": pat, "outgoing": outgoing, "fn": fn,
-                                  "owner": self._loading, "_attached": False})
+            owner = self._loading
+
+            @functools.wraps(fn)
+            async def counted(event, *a, **kw):             # .menu: söndürülmüş komanda işləmir, çağırış sayılır, cavab gizlənə bilər
+                if not self.gate(owner, name, event):
+                    return None
+                mode = self.quiet_start(name, event)            # "" | "early" | "late"
+                if mode == "early":                             # komanda mesajı DƏRHAL silinir — çatda qalmır
+                    await self.quiet_finish(event)
+                try:
+                    return await fn(event, *a, **kw)
+                finally:
+                    if mode == "late":
+                        await self.quiet_finish(event)
+
+            self.commands.append({"name": name, "pattern": pat, "outgoing": outgoing, "fn": counted,
+                                  "owner": owner, "_attached": False})
             if help:
                 short, long = help
                 self.add_help(name, f".{name}", short, long, category)
             return fn
         return deco
+
+    def quiet_start(self, name, event) -> str:
+        try:
+            from userbot.core import plugin_menu
+            return plugin_menu.quiet_start(self, name, event)
+        except Exception as e:
+            logger.debug("cavab gizlətmə: %r", e)
+            return ""
+
+    async def quiet_finish(self, event):
+        """Gizlədilmiş komandanın mesajı çatdan silinir."""
+        try:
+            await event.delete()
+        except Exception as e:
+            logger.debug("gizlədilən komanda mesajı silinmədi: %r", e)
+
+    def gate(self, owner, name, event) -> bool:
+        """Komanda işləməlimi (userbot/core/plugin_menu.py). Menyunun xətası heç vaxt komandanı bloklamır."""
+        try:
+            from userbot.core import plugin_menu
+            return plugin_menu.gate(self, owner, name, event)
+        except Exception as e:
+            logger.debug("komanda qapısı: %r", e)
+            return True
 
     def raw(self, event_builder):
         def deco(fn):

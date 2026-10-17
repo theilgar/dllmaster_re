@@ -449,3 +449,61 @@ EXTRA.update({
     "{date} tarixinədək": _t("until {date}", "до {date}", "{date} tarihine kadar"),
     "🔥 Premium -{pct}%": _t("🔥 Premium -{pct}%", "🔥 Premium -{pct}%", "🔥 Premium -%{pct}"),
 })
+
+# ── ⌨️ menyu düymələri (bot/core/menu_button.py, bot/plugins/menu_button_plugin.py) ──
+EXTRA.update({
+    # klaviatura düymələri (Telegram düymə mətni ≤ ~30 simvol saxlayın)
+    "📋 Menyu": _t("📋 Menu", "📋 Меню", "📋 Menü"),
+    "🔎 Axtar": _t("🔎 Search", "🔎 Поиск", "🔎 Ara"),
+    "🎧 Format": _t("🎧 Format", "🎧 Формат", "🎧 Format"),
+    "📚 Pleylistlər": _t("📚 Playlists", "📚 Плейлисты", "📚 Çalma listeleri"),
+    "💎 Premium": _t("💎 Premium", "💎 Премиум", "💎 Premium"),
+    "🎁 Dəvət et": _t("🎁 Invite", "🎁 Пригласить", "🎁 Davet et"),
+    "Mahnı adı və ya link yazın...": _t("Type a song name or link...", "Введите название песни или ссылку...",
+                                        "Şarkı adı veya bağlantı yazın..."),
+    # komanda siyahısı (Telegram "Menu" düyməsi)
+    "Botu başlat": _t("Start the bot", "Запустить бота", "Botu başlat"),
+    "Menyunu aç": _t("Open the menu", "Открыть меню", "Menüyü aç"),
+    "Mahnı axtar": _t("Search for a song", "Найти песню", "Şarkı ara"),
+    "Oxşar mahnılar (mahnıya cavab verin)": _t("Similar songs (reply to a song)", "Похожие песни (ответом на песню)",
+                                               "Benzer şarkılar (bir şarkıya yanıt verin)"),
+    "Mahnını tanı (audioya cavab verin)": _t("Recognize a song (reply to audio)", "Распознать песню (ответом на аудио)",
+                                             "Şarkıyı tanı (bir sese yanıt verin)"),
+    "Audio formatı": _t("Audio format", "Формат аудио", "Ses formatı"),
+    "Pleylistlərim": _t("My playlists", "Мои плейлисты", "Çalma listelerim"),
+    "Premium statusu": _t("Premium status", "Статус Premium", "Premium durumu"),
+    "Dili dəyiş": _t("Change language", "Сменить язык", "Dili değiştir"),
+    "Klaviatura düymələrini aç / bağla": _t("Show / hide the keyboard buttons", "Показать / скрыть кнопки клавиатуры",
+                                            "Klavye düğmelerini aç / kapat"),
+    "Depo doldurucu": _t("Depot filler", "Наполнитель хранилища", "Depo doldurucu"),
+    "Plugin-lər": _t("Plugins", "Плагины", "Eklentiler"),
+    "Loglar": _t("Logs", "Логи", "Günlükler"),
+    "Menyu düymələri və komanda siyahısı": _t("Menu buttons and command list", "Кнопки меню и список команд",
+                                              "Menü düğmeleri ve komut listesi"),
+    "Botu yenidən başlat": _t("Restart the bot", "Перезапустить бота", "Botu yeniden başlat"),
+    # mesajlar
+    "⌨️ Klaviatura aktivdir. Söndürmək: /keyboard": _t("⌨️ Keyboard is on. Turn off: /keyboard",
+                                                       "⌨️ Клавиатура включена. Выключить: /keyboard",
+                                                       "⌨️ Klavye açık. Kapatmak için: /keyboard"),
+    "⌨️ Klaviatura söndürüldü": _t("⌨️ Keyboard turned off", "⌨️ Клавиатура выключена", "⌨️ Klavye kapatıldı"),
+    "⌨️ Klaviatura yeniləndi": _t("⌨️ Keyboard updated", "⌨️ Клавиатура обновлена", "⌨️ Klavye güncellendi"),
+    "⌨️ Klaviatura yalnız şəxsi çatda işləyir": _t("⌨️ The keyboard only works in a private chat",
+                                                   "⌨️ Клавиатура работает только в личном чате",
+                                                   "⌨️ Klavye yalnızca özel sohbette çalışır"),
+    "⌨️ Klaviatura bağlıdır — /keyboard ilə yenidən aça bilərsiniz": _t(
+        "⌨️ The keyboard is off — you can turn it on again with /keyboard",
+        "⌨️ Клавиатура выключена — включить снова можно командой /keyboard",
+        "⌨️ Klavye kapalı — /keyboard ile yeniden açabilirsiniz"),
+    "🔎 Inline axtarış": _t("🔎 Inline search", "🔎 Инлайн-поиск", "🔎 Satır içi arama"),
+    "🔎 Mahnı adını yazın, YouTube/Spotify linki göndərin və ya inline axtarışdan istifadə edin.": _t(
+        "🔎 Type a song name, send a YouTube/Spotify link or use inline search.",
+        "🔎 Напишите название песни, отправьте ссылку YouTube/Spotify или используйте инлайн-поиск.",
+        "🔎 Şarkı adını yazın, YouTube/Spotify bağlantısı gönderin veya satır içi aramayı kullanın."),
+})
+
+EXTRA.update({
+    "⌨️ Tam menyu klaviaturası aktivdir — bütün bölmələr düymələrlə açılır. Söndürmək: /keyboard off": _t(
+        "⌨️ Full menu keyboard is on — every section opens with a button. Turn off: /keyboard off",
+        "⌨️ Клавиатура полного меню включена — каждый раздел открывается кнопкой. Выключить: /keyboard off",
+        "⌨️ Tam menü klavyesi açık — her bölüm bir düğmeyle açılır. Kapatmak için: /keyboard off"),
+})

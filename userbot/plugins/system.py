@@ -315,14 +315,15 @@ def register(ub):
             await o.update(await build_status())
         out.refresh = refresh
 
-    @ub.command("storage", pattern=r"^\.(?:storage|disk|size)(?:\s+(\S+))?$",
+    @ub.command("storage", pattern=r"^\.(?:storage|disk|size)(?:\s+(.+))?$",
                 help=("layihə və fayl yaddaşı",
                       "Layihənin, pluginlərin və digər bot fayllarının yaddaşını göstərir.\n\n"
                       "<b>İstifadə:</b>\n• <code>.storage</code> — yaddaş və fayl bölgüsü\n"
-                      "• <code>.storage clean</code> — keşi və müvəqqəti faylları təmizlə"))
+                      "• <code>.storage clean</code> — keşi və müvəqqəti faylları təmizlə\n"
+                      "• <code>.storage records</code> — səs qeydlərini (data/records) təmizlə"))
     async def on_storage(event):
         from common.diagnostics import project_storage_snapshot
-        from common.utilities import cleanup_downloads, format_bytes
+        from common.utilities import cleanup_downloads, cleanup_records, format_bytes
 
         def build_storage_body():
             s = project_storage_snapshot()
@@ -338,9 +339,15 @@ def register(ub):
             body.append(("# Ən Böyük Pluginlər", ""))
             for i, p in enumerate(s["top_plugins"][:5], 1):
                 body.append((f"{p['type']} {p['name']}", p['size_str']))
-            return ff(ub.title("storage"), body, footer="🧹 Təmizləmək üçün: .storage clean")
+            return ff(ub.title("storage"), body, footer="🧹 Təmizləmək: .storage clean · .storage records")
 
         arg = (event.pattern_match.group(1) or "").strip().lower()
+        if arg in ("clean records", "clean_records", "records", "recs", "vcrec"):
+            freed_bytes, freed_files = await cleanup_records()
+            await asyncio.to_thread(project_storage_snapshot, force=True)
+            msg = f"🎙 Səs qeydləri təmizləndi: {freed_files} fayl ({format_bytes(freed_bytes)} boşaldıldı)" if freed_files else "ℹ️ Silinəcək səs qeydi tapılmadı"
+            await safe_edit(event, f"<code>{msg}</code>\n\n" + await asyncio.to_thread(build_storage_body))
+            return
         if arg in ("clean", "clear"):
             freed_bytes, freed_files = await cleanup_downloads()
             await asyncio.to_thread(project_storage_snapshot, force=True)

@@ -280,9 +280,11 @@ class YtmCrawler:
 
     def __init__(self):
         self.yt = None
-        self.stats = {"artist": None, "found": 0, "in_depo": 0, "note": ""}
+        self.stats = {"artist": None, "found": 0, "in_depo": 0, "note": "", "err": 0, "err_at": 0.0}
         self.countries = []
         self.filler = None
+        self._inflight = {}                 # aid → ad: hazırda oxunan ifaçılar (paralel yuvalar eyni ifaçını götürmür)
+        self._seed_lock = None              # tənbəl: event loop-a bağlıdır
 
     def client(self):
         if self.yt is None:
@@ -328,13 +330,27 @@ class YtmCrawler:
             cur.execute("UPDATE depo_ytm SET prio = 0 WHERE prio > 0")
 
     def _next_pending(self):
-        if self.filler and self.filler.country_strict():
-            return get_db().sql_one(
-                "SELECT aid, name, COALESCE(prio, 0) FROM depo_ytm WHERE state = 0 AND COALESCE(prio, 0) > 0 "
-                "ORDER BY COALESCE(prio, 0) DESC, seq LIMIT 1")
+        busy = list(self._inflight)
+        strict = " AND COALESCE(prio, 0) > 0" if self.filler and self.filler.country_strict() else ""
         return get_db().sql_one(
-            "SELECT aid, name, COALESCE(prio, 0) FROM depo_ytm WHERE state = 0 "
-            "ORDER BY COALESCE(prio, 0) DESC, seq LIMIT 1")
+            "SELECT aid, name, COALESCE(prio, 0) FROM depo_ytm WHERE state = 0" + strict
+            + " AND NOT (aid = ANY(%s::text[])) ORDER BY COALESCE(prio, 0) DESC, seq LIMIT 1", (busy,))
+
+    def _claim(self):
+        """Növbəti ifaçını götürür və 'oxunur' işarələyir (await olmadığı üçün yuvalar arasında atomikdir)."""
+        row = self._next_pending()
+        if row:
+            self._inflight[row[0]] = row[1] or row[0]
+            self._show_reading()
+        return row
+
+    def _release(self, aid):
+        self._inflight.pop(aid, None)
+        self._show_reading()
+
+    def _show_reading(self):
+        names = list(self._inflight.values())
+        self.stats["artist"] = " · ".join(names[:3]) + (f" +{len(names) - 3}" if len(names) > 3 else "") if names else None
 
     def _mark(self, aid, state, songs=0):
         with get_db().sql() as cur:
@@ -479,42 +495,60 @@ class YtmCrawler:
                     related.append((x["id"], x.get("name") or ""))
         return name, tracks, related
 
+    @staticmethod
+    def _is_throttle(e: Exception) -> bool:
+        """Bağlantı / limit xətası (şəbəkə) — paralel sayını azaltmağa dəyər; 'tapılmadı' kimi ifaçıya aid xətalar yox."""
+        text = str(e).lower()
+        return isinstance(e, (ConnectionError, TimeoutError, OSError)) or any(
+            s in text for s in ("429", "too many", "connection", "timed out", "timeout", "reset", "aborted", "rate"))
+
     async def step(self, add_items, user_artists_fn, stop) -> bool:
-        row = self._next_pending()
+        row = self._claim()
         if not row:
-            n = self._requeue_old()
-            if not n:
-                self.stats["note"] = "seed: chartlar və janrlar oxunur..."
-                pairs = await asyncio.to_thread(self._seed_sync, user_artists_fn(), stop)
-                seed_prio = COUNTRY_PRIO_TOP if self.countries else 0
-                n = await asyncio.to_thread(self.add_artists, pairs, seed_prio)
-                logger.info(f"🎵 YT Music seed: {len(pairs)} ifaçı ({n} yeni, prio={seed_prio})")
-            self.stats["note"] = ""
-            row = self._next_pending()
+            if self._seed_lock is None:
+                self._seed_lock = asyncio.Lock()
+            async with self._seed_lock:                 # paralel yuvalardan yalnız biri seed edir / köhnələri qaytarır
+                row = self._claim()                     # gözləyərkən başqa yuva artıq doldurmuş ola bilər
+                if not row and not self._inflight:      # başqa yuva ifaçı oxuyursa — onun 'əlaqəli ifaçıları' gələ bilər
+                    n = self._requeue_old()
+                    if not n:
+                        self.stats["note"] = "seed: chartlar və janrlar oxunur..."
+                        pairs = await asyncio.to_thread(self._seed_sync, user_artists_fn(), stop)
+                        seed_prio = COUNTRY_PRIO_TOP if self.countries else 0
+                        n = await asyncio.to_thread(self.add_artists, pairs, seed_prio)
+                        logger.info(f"🎵 YT Music seed: {len(pairs)} ifaçı ({n} yeni, prio={seed_prio})")
+                    self.stats["note"] = ""
+                    row = self._claim()
+            if not row and self._inflight:
+                await asyncio.sleep(2)                  # başqa yuva hələ oxuyur — yeni ifaçılar düşə bilər, saatlıq gözləmə yox
+                return True
             if not row:
                 self.stats["note"] = "yeni ifaçı yoxdur — 1 saat sonra yenidən"
                 return False
         aid, name, prio = row[0], row[1], int(row[2] or 0)
-        self.stats["artist"] = name or aid
         try:
-            name, tracks, related = await asyncio.to_thread(self._artist_sync, aid, stop)
-        except Exception as e:
-            logger.info(f"🎵 YTM ifaçı {name or aid}: {e}")
-            self._mark(aid, 2)
-            self.stats["artist"] = None
+            try:
+                name, tracks, related = await asyncio.to_thread(self._artist_sync, aid, stop)
+            except Exception as e:
+                logger.info(f"🎵 YTM ifaçı {name or aid}: {e}")
+                self._mark(aid, 2)
+                if self._is_throttle(e):
+                    self.stats["err"] += 1
+                    self.stats["err_at"] = time.time()
+                return True
+            items, vids = [], set()
+            for t in tracks:
+                it = ytm_item(t, t.get("_fa"), t.get("_ft"))
+                if it and it["vid"] not in vids:
+                    vids.add(it["vid"])
+                    items.append(it)
+            new_artists = await asyncio.to_thread(self.add_artists, related, max(0, prio - 1))
+            added, in_depo = await add_items(items, front=prio > 0)
+            self.stats["found"] += added
+            self.stats["in_depo"] += in_depo
+            self._mark(aid, 1, len(items))
+            logger.info(f"🎵 YTM {name}: {len(items)} mahnı (+{added} növbəyə, {in_depo} artıq depoda), "
+                        f"+{new_artists} yeni ifaçı")
             return True
-        items, vids = [], set()
-        for t in tracks:
-            it = ytm_item(t, t.get("_fa"), t.get("_ft"))
-            if it and it["vid"] not in vids:
-                vids.add(it["vid"])
-                items.append(it)
-        new_artists = await asyncio.to_thread(self.add_artists, related, max(0, prio - 1))
-        added, in_depo = await add_items(items, front=prio > 0)
-        self.stats["found"] += added
-        self.stats["in_depo"] += in_depo
-        self._mark(aid, 1, len(items))
-        self.stats.update(artist=None, note="")
-        logger.info(f"🎵 YTM {name}: {len(items)} mahnı (+{added} növbəyə, {in_depo} artıq depoda), "
-                    f"+{new_artists} yeni ifaçı")
-        return True
+        finally:
+            self._release(aid)

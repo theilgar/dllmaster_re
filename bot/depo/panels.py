@@ -15,8 +15,10 @@ from html import escape
 
 from aiogram.types import InlineKeyboardMarkup
 
-from bot.core import audio_cache, depo_helpers, panel as ui
+from bot.core import audio_cache, depo_helpers, depo_shards, panel as ui
+from bot.core.depo_tuning import TUNABLES
 from bot.core.panel import btn
+from bot.depo import ytm_menu
 from bot.depo.crawler import COUNTRIES, DEFAULT_COUNTRY_SEARCH_QUERIES, HAS_YTM
 from bot.depo.engine import (
     MAX_WORKERS,
@@ -51,7 +53,12 @@ def helpers_guide_view():
         "• 📦 <b>Yalnız doldurucu</b> — yalnız Depo Doldurucunun mahnıları köməkçilərə gedir; "
         "istifadəçi yükləmələri əsas botda qalır.\n"
         "• 🌐 <b>Bütün depo yükləmələri</b> — istifadəçilərin yükləməsi də köməkçilərlə depoya yazılır.\n\n"
-        "<b>⏱ Sürət limiti</b> — hər köməkçinin dəqiqədə neçə mahnı göndərəcəyi. Telegram həddi ≈ 20; "
+        "<b>🎛 Tənzimləmələr</b> — sürət limiti, qrup aralığı, çevirmə aralığı və s. Hər biri iki rejimdə:\n"
+        "• 🤖 <b>Avto</b> — flood alanda özü yavaşlayır, sakit dövrdə yenidən sürətlənir.\n"
+        "• ✋ <b>Manual</b> — yazdığın dəyər olduğu kimi qalır.\n"
+        "• 🚀 <b>Köməkçi turbo</b> — avtonun başlanğıc dəyərləri maksimuma qalxır (sürət 20, qrup aralığı 3 san. və s.); "
+        "flood olanda yenə yavaşlayır.\n"
+        "Sürət limiti — hər köməkçinin dəqiqədə neçə mahnı göndərəcəyi; Telegram həddi ≈ 20, "
         "bundan çox qoysan flood (müvəqqəti blok) riski artır.\n\n"
         "<b>🔁 Çevirmə</b> — mahnının <code>file_id</code>-si hər bot üçün fərqlidir, əsas bot köməkçinin "
         "<code>file_id</code>-si ilə göndərə bilmir. Ona görə mahnı əsas botun <code>file_id</code>-sinə çevrilir:\n"
@@ -72,6 +79,22 @@ def helpers_guide_view():
         "yoxsa ⚠️ statusu görünür və o bot istifadə edilmir."
     )
     return text, InlineKeyboardMarkup(inline_keyboard=[ui.nav("df:hp", "Köməkçi botlar", close_data="df:close")])
+
+
+def tune_guide_view():
+    lines = [
+        "🎛 <b>Tənzimləmələr › Bələdçi</b>\n━━━━━━━━━━━━━━━━━━",
+        "<b>Rejimlər</b>",
+        "• 🤖 <b>Avto</b> — bot özü tənzimləyir: flood alanda təhlükəsiz tərəfə sürüşür, 5 dəq. sakit keçəndə "
+        "addım-addım geri qayıdır. Öyrəndiyi dəyər restartdan sonra qalır.",
+        "• ✋ <b>Manual</b> — yazdığın dəyər olduğu kimi qalır, flood-a baxılmır.",
+        "• 🚀 <b>Köməkçi turbo</b> — avtonun başlanğıc dəyərləri maksimuma qalxır; manual ayarlara toxunmur.",
+        "• 🤖 <b>Hamısı avto</b> — bütün ayarları avto rejimə qaytarır.\n",
+        "<b>Ayarlar</b>",
+    ]
+    for t in TUNABLES.values():
+        lines.append(f"{t.icon} <b>{t.label}</b> — {t.info}\n   💡 {t.tip}\n   🤖 {t.auto_info}")
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=[ui.nav("df:tn", "Tənzimləmələr", close_data="df:close")])
 
 
 def df_top_interval_picker_view(sess: dict | None = None, note: str = "", back: str = "dt:start"):
@@ -117,6 +140,7 @@ def dd_result_view(st: dict, note: str = ""):
     if st["samples"]:
         text += "\n<b>Nümunə dublikatlar:</b>\n" + "\n".join(
             "• " + " ⇄ ".join(escape(x) for x in g) for g in st["samples"][:5])
+    text += _parts_text(st, "total", "dups")
     if st["stopped"]:
         text += "\n\n⚠️ <i>Yoxlama tam deyil — nəticələr yalnız oxunan hissə üçündür</i>"
     nn = len(st.get("novid_posts") or [])
@@ -138,6 +162,20 @@ def dd_result_view(st: dict, note: str = ""):
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _parts_text(st: dict, total_key: str, kind_key: str) -> str:
+    """Çox kanallı yoxlamada hər kanalın qısa sətri + oxunmayan kanallar."""
+    parts = st.get("parts")
+    if not parts:
+        return ""
+    lines = ["\n<b>📦 Kanallar:</b>"]
+    for p in parts:
+        n = len(p[kind_key])
+        lines.append(f"• {escape(str(p.get('ref') or p['depo_id']))} — {p[total_key]} post"
+                     + (f" · {'🗑 yoxdur' if kind_key == 'missing' else '🧬 dublikat'}: {n}" if n else " · ✅"))
+    lines += [f"⚠️ {escape(e)}" for e in st.get("errors") or []]
+    return "\n".join(lines) + "\n"
+
+
 def sync_result_view(st: dict, note: str = ""):
     miss = len(st["missing"])
     pct = miss / st["checked"] * 100 if st["checked"] else 0
@@ -146,7 +184,8 @@ def sync_result_view(st: dict, note: str = ""):
             f"{int(time.time() - st['started'])} san.)</i>\n━━━━━━━━━━━━━━━━━━\n"
             f"📨 Bazada depo postu: <b>{st['total']}</b> · yoxlandı: {st['checked']}\n"
             f"🗑 Kanalda yoxdur (silinib): <b>{miss}</b> ({pct:.1f}%)\n"
-            + (f"❔ Yoxlanıla bilmədi: {st['unknown']}\n" if st["unknown"] else ""))
+            + (f"❔ Yoxlanıla bilmədi: {st['unknown']}\n" if st["unknown"] else "")
+            + _parts_text(st, "total", "missing"))
     rows = []
     if miss:
         text += ("\n<b>Nə edək?</b>\n"
@@ -225,7 +264,7 @@ def make_views(filler, helpers, tg, context, scan_state, clean_pending, clean_wa
                 + (f" · ❌ {c['failed']}" if c["failed"] else "")
                 + f" · 🎶 tapıldı {c['songs']} · 📋 növbədə {len(filler.ytm_queue)}")
         if ys["artist"]:
-            line += f"\n   🔎 <i>{escape(str(ys['artist'])[:40])}</i> oxunur"
+            line += f"\n   🔎 <i>{escape(str(ys['artist'])[:70])}</i> oxunur ({filler.ytm_parallel} paralel)"
         if ys["note"]:
             line += f"\n   ℹ️ <i>{escape(ys['note'])}</i>"
         return line
@@ -272,17 +311,62 @@ def make_views(filler, helpers, tg, context, scan_state, clean_pending, clean_wa
                 ui.nav(back, "Monitor" if bk == "dt" else "Doldurucu", close_data="df:close")]
         return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
 
-    def df_rate_picker_view(note: str = ""):
-        lines = [
-            "🤖 <b>Köməkçi botlar › Sürət limiti</b>\n━━━━━━━━━━━━━━━━━━",
-            "⏱ <b>Köməkçi botların sürət limiti:</b>\n",
-            f"Hazırkı dəyər: <b>{helpers.rate} mahnı/dəq. hər bot</b>\n",
-            "<i>(Bir köməkçi botun dəqiqədə maksimum yönləndirə biləcəyi mahnı sayı. 20-dən çox Telegram flood riski yarada bilər)</i>",
-        ]
+    def df_tune_hub_view(note: str = ""):
+        p = helpers
+        lines = ["🎛 <b>Köməkçi botlar › Tənzimləmələr</b>\n━━━━━━━━━━━━━━━━━━",
+                 "🤖 <b>Avto</b> — flood-a görə özü tənzimlənir · ✋ <b>Manual</b> — yazdığın dəyər",
+                 "🚀 <b>Köməkçi turbo</b> — avtonun başlanğıc dəyərləri maksimuma qalxır, flood olanda yenə "
+                 "yavaşlayır. Manual ayarlara toxunmur.\n"]
+        btns = []
+        for key, t in TUNABLES.items():
+            auto = p.tune_mode(key) == "auto"
+            val = p.tune(key)
+            lines.append(f"{t.icon} {t.label}: <b>{t.fmt(val)}</b> · {'🤖' if auto else '✋'}")
+            btns.append(btn(f"{t.icon} {t.short}: {'🤖' if auto else '✋'} {val:g}", f"df:tn:{key}"))
         if note:
             lines.append(f"\n{note}")
-        rows = ui.stepper("df:vstep:hpr:", "df:vinp:hpr") + [ui.nav("df:hp", "Köməkçi botlar", close_data="df:close")]
+        grid = ui.grid(btns, 2)
+        if len(grid[-1]) == 1:                                     # tək qalan ayar düyməsinin yanında bələdçi
+            grid[-1].append(btn("❓ Bələdçi", "df:tng"))
+            guide_row = []
+        else:
+            guide_row = [[btn("❓ Bələdçi", "df:tng")]]
+        rows = grid + [[ui.toggle("🚀 Köməkçi turbo", p.turbo, "df:tpf", compact=True),
+                        btn("🤖 Hamısı avto", "df:tna")]] + guide_row \
+            + [ui.nav("df:hp", "Köməkçi botlar", close_data="df:close")]
         return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+    def df_tune_view(key: str = "rate", note: str = ""):
+        t = TUNABLES.get(key) or TUNABLES["rate"]
+        key = t.key
+        p = helpers
+        auto = p.tune_mode(key) == "auto"
+        cur, base = p.tune(key), p.tune_base(key)
+        lines = [f"🎛 <b>Tənzimləmələr › {t.label}</b>\n━━━━━━━━━━━━━━━━━━",
+                 f"{t.icon} Hazırkı dəyər: <b>{t.fmt(cur)}</b> · {ui.AUTO if auto else ui.MANUAL}",
+                 f"<i>{t.info}</i>",
+                 f"💡 {t.tip}\n"]
+        if auto:
+            lines.append(f"🤖 {t.auto_info}")
+            if p.turbo and t.turbo is not None and t.derive is None:
+                lines.append(f"🚀 Köməkçi turbo aktivdir: başlanğıc {t.fmt(base)}, balanslı rejimdə {t.fmt(t.default)}.")
+            if t.safe and cur != base:
+                lines.append(f"Flood səbəbindən {t.fmt(base)} əvəzinə {t.fmt(cur)} işləyir, sakit dövrdə özü qayıdır.")
+        else:
+            lines.append(f"✋ Yazdığın dəyər olduğu kimi qalır, flood-a baxılmır. Avto olsaydı: {t.fmt(p.tune_auto(key))}")
+        if note:
+            lines.append(f"\n{note}")
+        rows = [[ui.mode("Rejim", auto, f"df:tm:{key}:{'manual' if auto else 'auto'}")]]
+        if not auto:
+            rows.append([btn(f"{d:+g}", f"df:ts:{key}:{d:+g}") for d in t.steps])
+            rows.append([btn("✏️ Öz rəqəmini yaz", f"df:tv:{key}")])
+        elif t.safe and cur != base:
+            rows.append([btn(f"↩️ Başlanğıc: {base:g}", f"df:tr:{key}")])
+        rows.append(ui.nav("df:tn", "Tənzimləmələr", close_data="df:close"))
+        return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+    def df_rate_picker_view(note: str = ""):
+        return df_tune_view("rate", note)
 
     def fail_view(note: str = ""):
         n, rows = filler.failed_list(12)
@@ -514,7 +598,7 @@ def make_views(filler, helpers, tg, context, scan_state, clean_pending, clean_wa
         lines = ["🤖 <b>Köməkçi botlar</b>\n━━━━━━━━━━━━━━━━━━",
                  "<i>Depoya yükləmə köməkçilərə paylanır — Telegram flood limiti hər bota ayrıdır.</i>\n",
                  f"📌 <b>Rejim:</b> {depo_helpers.SCOPES[p.scope]}",
-                 f"⏱ <b>Temp:</b> hər bot dəqiqədə <b>{p.rate}</b> mahnı",
+                 f"⏱ <b>Temp:</b> hər bot dəqiqədə <b>{p.rate}</b> mahnı {'🤖' if p.tune_mode('rate') == 'auto' else '✋'}",
                  f"🔁 <b>file_id çevirmə:</b> {depo_helpers.CONV_MODES[p.conv_mode]}",
                  f"   <i>{len(p.sinks())} sink çatı · {p.sink_interval():g} san. · "
                  f"⏳ çevrilməyib: {p.pending()} · ✅ istənəndə: {p.cstats['lazy']} · "
@@ -528,11 +612,20 @@ def make_views(filler, helpers, tg, context, scan_state, clean_pending, clean_wa
             bad = len(p.helpers) - ok
             lines.append(f"🤖 <b>Cəmi:</b> {len(p.helpers)} bot · 🟢 {ok}"
                          + (f" · ⚠️ {bad} problemli" if bad else "") + (f" · ⏳ {fl} flood-da" if fl else ""))
+        left = p.channel_cool_left()
+        shards = p.shard_report()
+        if len(shards) > 1:
+            lines.append("📦 <b>Depo kanalları:</b>")
+            for r in shards:
+                state = f"🌊 {int(r['left'] // 60) + 1} dəq." if r["left"] > 0 else "🟢"
+                lines.append(f"   {state} {escape(str(r['ref']))} · 🤖 {r['helpers']} · ⬆️ {r['sent']}/10 dəq.")
+        elif left > 0:
+            lines.append(f"🌊 <b>Depo kanalı flood-da:</b> ~{int(left // 60) + 1} dəq. qalıb · köməkçilər dayandırılıb")
         lines.append("")
         if pages > 1:
             lines.append(f"<i>Səhifə {hp_page['n'] + 1}/{pages}</i>")
         for i, h in enumerate(p.helpers[start:start + HP_PER_PAGE], start + 1):
-            cool = int(h.cool_until - now)
+            cool = int(max(h.cool_until, max(getattr(h, "cool_chat", {}).values(), default=0.0)) - now)
             lines.append(f"{i}. <b>{escape(h.name)}</b>{' <i>(config.env)</i>' if h.from_env else ''}\n"
                          f"   {escape(h.status)} · ⬆️ {h.sent}"
                          + (f" · 🌊 flood {h.floods}" if h.floods else "")
@@ -556,10 +649,13 @@ def make_views(filler, helpers, tg, context, scan_state, clean_pending, clean_wa
         nxt = next_of(order, p.scope)
         rows = [[btn(f"📌 Rejim: {depo_helpers.SCOPES[p.scope]}  ›  {depo_helpers.SCOPES[nxt].split(' ', 1)[1]}",
                      f"df:hps:{nxt}")]]
+        n_ch = len(depo_shards.extras())
+        shard_btn = btn("📢 Depo kanalları" + (f": {n_ch + 1}" if n_ch else ""), "dc:panel")
         if p.scope != "off":                                    # söndürülübsə sürət / çevirmə düymələri lazım deyil
-            rows.append([btn(f"⏱ Sürət limiti: {p.rate}/dəq. hər bot", "df:pick:hpr")])
+            rows.append([btn("🎛 Tənzimləmələr" + (" 🚀" if p.turbo else ""), "df:tn"), shard_btn])
             rows.append([btn(f"🔁 Çevirmə: {depo_helpers.CONV_MODES[p.conv_mode].split(' —')[0]}", "df:hpconv")])
         else:
+            rows.append([shard_btn])
             lines = [ln for ln in lines if not ln.startswith(("⏱ <b>Temp:", "🔁 <b>file_id", "   <i>", "🚀 <b>Nəzəri"))]
         rows.append([btn("➕ Köməkçi bot əlavə et", "df:hpadd"), btn("🩺 Hamısını yoxla", "df:hpchk")])
         rm = [btn(f"🗑 {i + 1}. {h.name}"[:32], f"df:hprm:{i}")
@@ -600,9 +696,11 @@ def make_views(filler, helpers, tg, context, scan_state, clean_pending, clean_wa
         db = get_db()
         stats = None
         try:
-            depo_id = int(depo_ref) if str(depo_ref).lstrip("-").isdigit() else None
-            if depo_id:
-                stats = db.cache_depo_checked_stats(depo_id)
+            main_id = int(depo_ref) if str(depo_ref).lstrip("-").isdigit() else audio_cache._depo.get("id")
+            ids = [i for i in [main_id, *depo_shards.shard_ids()] if i]       # əsas depo + əlavə kanallar
+            per = [db.cache_depo_checked_stats(i) for i in ids]
+            if per:
+                stats = {k: sum(x[k] for x in per) for k in ("total_mids", "fresh_mids", "stale_mids")}
         except Exception as _e:
             logger.debug("udulan xəta [bot/plugins/depo_filler_plugin.py:4245]: %r", _e)
 
@@ -741,7 +839,8 @@ def make_views(filler, helpers, tg, context, scan_state, clean_pending, clean_wa
                            btn(f"⏱ Fasilə: {filler.delay} san.", "df:pick:d")),
                 *mode_rows("🧵 Worker", filler.workers_mode == "auto", "df:wm",
                            btn(f"🧵 Worker: {workers_label(filler.workers)}", "df:pick:w")),
-                [ui.toggle("🎵 YT Music", filler.ytm_on, "df:ytm", compact=True)],
+                [ui.toggle("🎵 YT Music", filler.ytm_on, "df:ytm", compact=True),
+                 *([btn(ytm_menu.button_text(filler), "df:yp")] if HAS_YTM and filler.ytm_on else [])],
                 [btn("🔁 Yenidən qur", "df:rebuild"), btn("📋 Mənbələr", "df:sources")],
                 [btn(("⚡ Məcburi davam ⚠️" if stall else "⚡ Məcburi davam"), "df:force"),
                  btn(f"📋 Gözləyənlər ({len(filler.retry)}/❌{nfail})", "df:q:r:0" if filler.retry or not nfail else "df:q:f:0")],
@@ -777,6 +876,8 @@ def make_views(filler, helpers, tg, context, scan_state, clean_pending, clean_wa
         df_delay_picker_view=df_delay_picker_view,
         df_worker_picker_view=df_worker_picker_view,
         df_rate_picker_view=df_rate_picker_view,
+        df_tune_hub_view=df_tune_hub_view,
+        df_tune_view=df_tune_view,
         fail_view=fail_view,
         queue_view=queue_view,
         country_queries_list_view=country_queries_list_view,

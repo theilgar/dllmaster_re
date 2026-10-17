@@ -35,7 +35,7 @@ from typing import Any, Dict, Tuple
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from common.kv import next_of
-from common.formatting import get_tz, progress_bar   # get_tz: BOT_TZ — statistika paneli ilə eyni "bu gün"
+from common.formatting import get_tz   # get_tz: BOT_TZ — statistika paneli ilə eyni "bu gün"
 
 logger = logging.getLogger(__name__)
 
@@ -64,24 +64,12 @@ def set_global_context(ctx: Any) -> None:
     _GLOBAL_CONTEXT = ctx
 
 
-def get_global_context() -> Any:
-    return _GLOBAL_CONTEXT
-
-
 def _resolve_ctx(ctx: Any = None) -> Any:
     return ctx or _GLOBAL_CONTEXT
 
 
 def _dot(ok: bool) -> str:
     return "🟢" if ok else "🔴"
-
-
-def _pkg_version(name: str) -> str:
-    try:
-        from importlib.metadata import version
-        return version(name)
-    except Exception:
-        return "—"
 
 
 def _module_ok(name: str) -> bool:
@@ -270,10 +258,6 @@ def ui_button_label(style: str | None = None) -> str:
     return f"📋 Görünüş: {UI_STYLE_LABELS.get(style, style)}"
 
 
-def _disp_len(s: str) -> int:
-    return len(s)
-
-
 def _pad_col(s: str, width: int) -> str:
     return s.ljust(width)
 
@@ -380,26 +364,6 @@ def _bar(frac: float, width: int = 10) -> str:
     return _bar_box(frac, width)[1:-1]
 
 
-def format_ui_box(title: str, sections: list[Tuple[str, list[Any]]], max_width: int = 42) -> str:
-    """Depo canlı monitoru (depotop) üslubunda təmiz terminal / monitor formatlayıcısı."""
-    lines = []
-    for sec_title, items in sections:
-        clean_sec = _clean_html(sec_title).strip()
-        if lines:
-            lines.append("")
-        lines.append(f"# {clean_sec}")
-        for item in items:
-            if isinstance(item, (list, tuple)) and len(item) == 2 and isinstance(item[0], str):
-                k = _clean_html(str(item[0])).strip()
-                v = _clean_html(str(item[1])).strip()
-                lines.append(f"  {k:<16} {v}")
-            else:
-                s = _clean_html(str(item)).strip()
-                lines.append(f"  {s}")
-    code_content = escape("\n".join(lines))
-    return f"{title}\n<pre>{code_content}</pre>"
-
-
 # ═════════════════════════════════════════════════════════════
 # 📊 Status və Statistika Məlumatları
 # ═════════════════════════════════════════════════════════════
@@ -457,51 +421,6 @@ def _depo_line(ctx: Any = None) -> str:
         return "📦 Depo"
 
 
-def _userbot_line(ctx: Any = None) -> str:
-    c = _resolve_ctx(ctx)
-    if c and not getattr(c, "userbot_enabled", True):
-        return "📱 Userbot: <i>söndürülüb (yalnız bot rejimi)</i>"
-
-    fn1 = getattr(c, "is_ub1_active", None) if c else None
-    ub1_on = fn1() if fn1 is not None else False
-    c1 = getattr(c, "telethon_client", None) if c else None
-    me1 = getattr(c, "telethon_me", None) if c else None
-    if fn1 is None and c1:
-        try:
-            ub1_on = bool(getattr(c, "userbot1_enabled", True) and c1.is_connected())
-        except Exception:
-            ub1_on = False
-    name1 = escape(getattr(me1, "first_name", "") or "") if me1 else ""
-    s1 = f"1️⃣ {'🟢' if ub1_on else '🔴'} {name1}" if me1 else "1️⃣ ⚪ qoşulmayıb"
-
-    fn2 = getattr(c, "is_ub2_active", None) if c else None
-    va = getattr(c, "voice_assistant", None) if c else None
-    if va and hasattr(va, "has_session") and va.has_session():
-        ub2_on = fn2() if fn2 is not None else bool(va.enabled and va.running)
-        me2 = getattr(va, "me", None)
-        name2 = escape(getattr(me2, "first_name", "") or "") if me2 else "Asistan"
-        s2 = f"2️⃣ {'🟢' if ub2_on else '🔴'} {name2}"
-    else:
-        s2 = "2️⃣ ⚪ qoşulmayıb"
-
-    return f"📱 Userbot: {s1} · {s2}"
-
-
-def _server_line() -> str:
-    try:
-        from common.diagnostics import server_snapshot
-        s = server_snapshot()
-    except Exception:
-        s = {}
-    parts = [f"CPU {s['cpu']:.0f}%"] if "cpu" in s else []
-    if "ram" in s:
-        parts.append(f"RAM {s['ram']:.0f}%")
-    if "disk" in s:
-        parts.append(f"Disk {s['disk']:.0f}%")
-    warn = any(s.get(k, 0) >= 90 for k in ("cpu", "ram", "disk"))
-    return "🖥 Server: " + (" · ".join(parts) or "—") + (" ⚠️" if warn else "")
-
-
 def _alerts(ctx: Any = None) -> list:
     out = []
     c = _resolve_ctx(ctx)
@@ -525,10 +444,6 @@ def _alerts(ctx: Any = None) -> list:
 # ═════════════════════════════════════════════════════════════
 # 🏷 Dinamik Düymə Etiketləri
 # ═════════════════════════════════════════════════════════════
-
-def _mus_label(ctx: Any = None) -> str:
-    return SECTIONS["mus"]
-
 
 def _depo_label(ctx: Any = None) -> str:
     c = _resolve_ctx(ctx)
@@ -925,10 +840,10 @@ def storage_view(note: str = "") -> Tuple[str, InlineKeyboardMarkup]:
         f"Mem [{_bar(ram_pct / 100, 10)}] bot {s['proc_rss_str']}  sis {s['ram_used_str']}/{s['ram_total_str']} ({ram_pct:.0f}%)",
         f"Dsk [{_bar(disk_pct / 100, 10)}] dsk {s['disk_used_str']}/{s['disk_total_str']} ({disk_pct:.0f}%)  layihə {s['total_size_str']}",
         "",
-        "# BÖLMƏ            ÖLÇÜ     FAYL",
+        "# BÖLMƏ                 ÖLÇÜ     FAYL",
     ]
     for cat in s["categories"]:
-        lines.append(f"  {cat['label'][:15]:<16} {cat['size_str']:>8} {cat['count']:>6}")
+        lines.append(f"  {cat['label']:<18} {cat['size_str']:>8} {cat['count']:>5}")
 
     lines.append("")
     lines.append("# ƏN BÖYÜK PLUGİNLƏR   ÖLÇÜ")
@@ -943,6 +858,7 @@ def storage_view(note: str = "") -> Tuple[str, InlineKeyboardMarkup]:
     rows = [
         [InlineKeyboardButton(text="🔄 Yenilə", callback_data="menu:storage_refresh"),
          InlineKeyboardButton(text="🧹 Keşi Təmizlə", callback_data="menu:storage_clean")],
+        [InlineKeyboardButton(text="🎙 Qeydləri Təmizlə", callback_data="menu:storage_clean_records")],
         nav_row("sys"),
     ]
     return box, InlineKeyboardMarkup(inline_keyboard=rows)
@@ -951,71 +867,6 @@ def storage_view(note: str = "") -> Tuple[str, InlineKeyboardMarkup]:
 # ═════════════════════════════════════════════════════════════
 # 📱 Userbot Vahid Menyu Kartı & Fastfetch
 # ═════════════════════════════════════════════════════════════
-
-def unified_userbot_view(ub: Any, tok: str) -> Tuple[str, InlineKeyboardMarkup]:
-    """Userbot üçün Vahid Menyu kartı və inline düymələri."""
-    text = main_text(getattr(ub, "context", None))
-
-    def bt(text: str, data: str) -> InlineKeyboardButton:
-        return InlineKeyboardButton(text=text, callback_data=f"ubm:{tok}:{data}"[:64])
-
-    rows = [
-        [bt("👥 İstifadəçilər & Qruplar", "aud"), bt("🎵 Musiqi & Media", "mus")],
-        [bt("📦 Depo", "depo"), bt("🎙 Canlı Yayım", "live")],
-        [bt("💎 Premium", "biz"), bt("📣 Yayım", "com")],
-        [bt("📱 Səs & Audit", "logger"), bt("🖥 Sistem", "sys")],
-        [bt("🔄 Yenilə", "main"), bt("❓ Help", "help"), bt("✖️ Bağla", "close")],
-    ]
-    return text, InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def build_unified_fastfetch_text(ub_or_ctx: Any) -> str:
-    """Userbot üçün mətn-rejimli Fastfetch formatlı Vahid Menyu paneli.
-    İnline düymə qadağan olan çatlarda avtomatik bu görünüş istifadə edilir."""
-    from userbot.core.userbot_api import ff, tr
-
-    ub = getattr(ub_or_ctx, "userbot", None) or ub_or_ctx
-    c = _resolve_ctx(getattr(ub, "context", None))
-
-    client = getattr(ub, "client", None)
-    on = client is not None and client.is_connected()
-
-    body = [
-        (tr("Userbot"), tr("● qoşulub") if on else tr("○ qoşulmayıb")),
-    ]
-
-    filler = getattr(c, "depo_filler", None) if c else None
-    if filler is not None:
-        try:
-            body.append((tr("Depo"), f"{tr('● işləyir') if filler.running else tr('○ dayanıb')} · {tr('növbə')} {len(filler.queue)}"))
-        except Exception as _e:
-            logger.debug("udulan xəta [common/menu.py:987]: %r", _e)
-
-    va = getattr(c, "voice_assistant", None) if c else None
-    if va is not None:
-        try:
-            n_rec = len(getattr(getattr(va, "rec", None), "sessions", {}) or {})
-            body.append((tr("Canlı"), f"{'🔴 aktiv' if n_rec else '⚪ boş'} · {n_rec} qeyd"))
-        except Exception as _e:
-            logger.debug("udulan xəta [common/menu.py:995]: %r", _e)
-
-    body.append((tr("İşlər"), f"{ub.active_tasks() if hasattr(ub, 'active_tasks') else 0} {tr('aktiv')}"))
-    body.append((tr("Komanda"), f"{len(getattr(ub, 'commands', []))} · {tr('bölmə')} {len(getattr(ub, 'sections', {}))}"))
-
-    # Əsas komandaların siyahısı
-    body.append("# 🚀 Əsas Komandalar")
-    body.append((".menu / .bmenu", "Vahid admin paneli"))
-    body.append((".alive / .ping", "Status və gecikmə yoxlanışı"))
-    body.append((".ff / .speedtest", "Sistem və şəbəkə sürəti"))
-    body.append((".storage", "Layihə və pluginlərin yaddaşı"))
-    body.append((".vcrec", "Səsli söhbət və yayım qeydiyyatı"))
-    body.append((".purge / .clear", "Mesajların təmizlənməsi"))
-    body.append((".filter / .automsg", "Açar söz və avto-cavab idarəsi"))
-    body.append((".inline [on|off]", "Qrupda inline rejimi idarəsi"))
-
-    title_str = getattr(ub, "title", lambda x: "menu")("menu")
-    return ff(title_str, body, footer=tr("tam interaktiv panel üçün bot çatında /menu yazın"))
-
 
 # ═════════════════════════════════════════════════════════════
 # 🔁 Uyğunluq və Əlaqə Köməkçiləri

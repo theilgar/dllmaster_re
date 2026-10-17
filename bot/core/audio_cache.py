@@ -19,7 +19,7 @@ from html import escape
 
 from aiogram.types import BufferedInputFile, FSInputFile
 
-from bot.core import song_names as names
+from bot.core import depo_shards, song_names as names
 from common.database import get_db
 
 logger = logging.getLogger(__name__)
@@ -166,17 +166,11 @@ async def depo_yt_chat_id(bot):
         return None
 
 
-async def depo_target_chat_id(bot, source: str = "ytm"):
-    """Mənbəyə uyğun depo kanalının ID-si."""
-    cid, _ = await depo_target_chat_info(bot, source=source)
-    return cid
-
-
 async def depo_target_chat_info(bot, source: str = "ytm") -> tuple[int | None, int | None]:
     """
     Mənbəyə uyğun (chat_id, message_thread_id) cütlüyü:
     - source == 'yt' olarsa və YouTube kanalı/topiki mövcuddursa → YouTube hədəfi
-    - əks halda → əsas depo hədəfi
+    - əks halda → əsas depo hədəfi; əlavə kanallar (shard) varsa onlar arasında yük bölünür (depo_shards)
     """
     if source == "yt":
         yt_id = await depo_yt_chat_id(bot)
@@ -187,7 +181,9 @@ async def depo_target_chat_info(bot, source: str = "ytm") -> tuple[int | None, i
             base_id = await depo_chat_id(bot)
             return base_id, yt_thread
     base_id = await depo_chat_id(bot)
-    return base_id, depo_thread_setting()
+    if not base_id:
+        return base_id, depo_thread_setting()
+    return await depo_shards.choose(bot, depo_shards.SLOT, base_id, depo_thread_setting())
 
 
 def depo_status() -> dict:
@@ -571,7 +567,10 @@ async def _upload_to_depo(bot, file_path, filename: str, title: str, performer: 
     except Exception as e:
         if "chat not found" in str(e).lower() or "not enough rights" in str(e).lower() \
                 or "forbidden" in str(e).lower():
-            _depo["id"], _depo["error"], _depo["checked"] = None, str(e), time.time()
+            if depo_shards.is_shard(chat_id):
+                depo_shards.mark_bad(chat_id, str(e))          # əlavə kanal: yalnız o kanal dayanır, əsas depo yox
+            else:
+                _depo["id"], _depo["error"], _depo["checked"] = None, str(e), time.time()
         return None
 
 

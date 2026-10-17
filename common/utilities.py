@@ -417,8 +417,8 @@ def safe_remove(*paths: str) -> int:
 
 
 async def cleanup_downloads(dirs: tuple[str, ...] = None) -> tuple[int, int]:
-    """Müvəqqəti yükləmə və işçi qovluqları (download/, data/shazam_tmp/, /dev/shm/dllmaster) təmizləyir."""
-    target_dirs = dirs or (DOWNLOAD_DIR, os.path.join("data", "shazam_tmp"), "/dev/shm/dllmaster", os.path.join("data", "temp"))
+    """Müvəqqəti yükləmə və işçi qovluqları (download/, data/shazam_tmp/, /dev/shm/dllmaster, data/voice_cache) təmizləyir."""
+    target_dirs = dirs or (DOWNLOAD_DIR, os.path.join("data", "shazam_tmp"), "/dev/shm/dllmaster", os.path.join("data", "temp"), os.path.join("data", "voice_cache"))
     freed_bytes, freed_files = 0, 0
     for d in target_dirs:
         if not os.path.isdir(d):
@@ -437,6 +437,52 @@ async def cleanup_downloads(dirs: tuple[str, ...] = None) -> tuple[int, int]:
 
 
 cleanup_temp_files = cleanup_downloads
+
+
+async def cleanup_records() -> tuple[int, int]:
+    """data/records/ qovluğundakı göndərilmiş bütün hazır faylları təmizləyir.
+    Hələ göndərilməyən (outbox.json-da olan) faylları saxlayır.
+    (freed_bytes, freed_files) qaytarır.
+    """
+    import json
+    import shutil
+
+    records_dir = os.path.join(str(BASE_DIR), "data", "records")
+    outbox_file = os.path.join(records_dir, "outbox.json")
+    if not os.path.isdir(records_dir):
+        return 0, 0
+
+    keep_paths = {os.path.abspath(outbox_file)}
+    if os.path.isfile(outbox_file):
+        try:
+            with open(outbox_file, encoding="utf-8") as f:
+                entries = json.load(f)
+                if isinstance(entries, list):
+                    for x in entries:
+                        if isinstance(x, dict) and x.get("path"):
+                            keep_paths.add(os.path.abspath(x["path"]))
+        except Exception as e:
+            logger.debug(f"outbox.json oxunmadı: {e}")
+
+    freed_bytes = 0
+    freed_files = 0
+    for name in os.listdir(records_dir):
+        p = os.path.join(records_dir, name)
+        abs_p = os.path.abspath(p)
+        if abs_p in keep_paths:
+            continue
+        try:
+            if os.path.isfile(p):
+                sz = os.path.getsize(p)
+                os.remove(p)
+                freed_bytes += sz
+                freed_files += 1
+            elif os.path.isdir(p):
+                shutil.rmtree(p, ignore_errors=True)
+        except OSError as e:
+            logger.debug(f"cleanup_records fayl silinmədi ({p}): {e}")
+
+    return freed_bytes, freed_files
 
 
 # ─────────────────────────────────────────────────────────────

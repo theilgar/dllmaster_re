@@ -21,7 +21,7 @@ from aiogram import F, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup
 
-from bot.core import audio_cache
+from bot.core import audio_cache, depo_access, depo_shards
 from bot.core.input_wait import InputWait, chain_menu_text
 from bot.core import panel as ui
 from bot.core.panel import btn
@@ -51,6 +51,24 @@ def setup(context):
         return f"📢 Depo kanalı · {st.get('ref')} {icon}"
 
     context.depo_channel_label = label
+
+    def shard_section() -> tuple:
+        """Əlavə kanallar: sətirlər (flood, köməkçi, yük) + sayı. Əlavə kanal yoxdursa — qısa işarə."""
+        from bot.depo.shard_menu import channel_line, policy_text
+        extra = depo_shards.extras()
+        if not extra:
+            return ["➕ <b>Əlavə kanallar:</b> <i>yoxdur — yükü bölmək üçün ➕ ilə əlavə et</i>"], 0
+        rep = {r["key"]: r for r in depo_shards.report()}
+        lines = ["➕ <b>Əlavə kanallar</b> <i>(yükü bölür)</i>"]
+        main = rep.get(depo_shards.MAIN_KEY)
+        if main:
+            lines.append("   " + channel_line(main).replace("\n", "\n   "))
+        for e in extra:
+            r = rep.get(depo_shards._key(e["ref"]))
+            if r:
+                lines.append("   " + channel_line(r).replace("\n", "\n   "))
+        lines.append("   " + policy_text())
+        return lines, len(extra)
 
     # ── görünüş ──
     def panel(note: str = ""):
@@ -82,6 +100,7 @@ def setup(context):
         else:
             yt_line = "▶️ <b>YouTube Deposu:</b> <i>Təyin olunmayıb (əsas depoya yönlənir)</i>"
 
+        shard_lines, n_extra = shard_section()
         link = escape(pub["link"]) if pub["link"] else "<i>yoxdur — 🔗 Linki dəyiş</i>"
         ytm_th_str = f" › 🧵 Mövzu #{thread_ytm}" if thread_ytm else ""
         lines = [
@@ -91,12 +110,13 @@ def setup(context):
             f"🎵 <b>YT Music Deposu:</b> {escape(str(pub['title']))} (<code>{escape(st['ref'])}</code>){ytm_th_str}",
             f"   🔌 <b>Vəziyyət:</b> {status}",
             yt_line,
+            *shard_lines,
             "━━━━━━━━━━━━━━━━━━",
             f"🔗 <b>/start linki:</b> {link}" + (" <i>(əl ilə)</i>" if pub["custom"] else ""),
             "👁 <b>/start düyməsi:</b> " + ("✅ göstərilir" if pub["show"] and pub["link"]
                                            else "❌ gizli" if not pub["show"] else "⚠️ link yoxdur"),
             "━━━━━━━━━━━━━━━━━━",
-            "<i>🎵 YT Music mahnıları əsas depoya, ▶️ YouTube videoları/mahnıları YouTube deposuna yüklənir. Forum qruplarında hər ikisi üçün ayrı mövzu (topik) təyin edə bilərsiniz.</i>\n<i>💡 Qrupda/mövzuda birbaşa: /setdepo (YT Music) və /setdepoyt (YouTube)</i>",
+            "<i>🎵 YT Music mahnıları əsas depoya, ▶️ YouTube videoları/mahnıları YouTube deposuna yüklənir (mənbəyə görə). Forum qruplarında hər ikisi üçün ayrı mövzu (topik) təyin edə bilərsiniz.</i>\n<i>➕ Əlavə kanallar tutumu artırır: Telegram hər bota hər kanal üçün ayrıca kvota verir, biri dolanda yükləmə digərinə keçir.</i>\n<i>💡 Qrupda/mövzuda birbaşa: /setdepo (YT Music) və /setdepoyt (YouTube)</i>",
         ]
         if note:
             lines.append(f"\n{note}")
@@ -111,6 +131,7 @@ def setup(context):
         rows = [
             [btn("✏️ YT Music kanalı", "dc:chat"), btn(th_ytm_lbl, "dc:thread_ytm")],
             yt_row,
+            [btn("➕ Əlavə kanal", "df:sha"), btn(f"📦 Kanallar: {n_extra + 1}" if n_extra else "📦 Kanallar", "df:sh")],
             [btn("🩺 Yoxla", "dc:check"), btn("🔗 Linki dəyiş", "dc:link")] + ([btn("♻️ Avto link", "dc:autolink")] if pub["custom"] else []),
             [ui.toggle("👁 /start-da göstər", pub["show"], "dc:show")],
             ui.nav("menu:depo", "Depo", close_data="dc:close"),
@@ -206,6 +227,14 @@ def setup(context):
             msg = "✅ YT Music əlçatandır" if cid else "❌ YT Music əlçatan deyil"
             if audio_cache.depo_yt_setting():
                 msg += " · " + ("✅ YouTube əlçatandır" if cid_yt else "❌ YouTube əlçatan deyil")
+            extra = depo_shards.extras()
+            if extra:                                    # əlavə kanallar: əsas bot admin-dirmi, hansı köməkçilər admin-dir
+                pool = getattr(context, "depo_helpers", None)
+                with contextlib.suppress(Exception):
+                    await pool.verify_all_shards()
+                ready = sum(1 for e in extra if (i := depo_shards._ids.get(depo_shards._key(e["ref"])))
+                            and i.get("id") and depo_shards.usable(i["id"]))
+                msg += f" · ➕ {ready}/{len(extra)} əlavə kanal hazır"
             await cb.answer(msg, show_alert=not cid or (bool(audio_cache.depo_yt_setting()) and not cid_yt))
         else:                                            # panel
             state.clear()
@@ -295,84 +324,14 @@ def setup(context):
             await to_panel(message, *panel("✅ Link yeniləndi"))
             return
 
-        # kind in ("chat", "chat_yt")
+        # kind in ("chat", "chat_yt") — kanalı tapmaq və botun hüququnu yoxlamaq: bot/core/depo_access.py (əlavə kanalla ortaq)
         if kind in ("chat", "chat_yt"):
-            from common.destinations import extract_topic_id, parse_target
-            fwd_thread = extract_topic_id(message)
-            parsed_thread = None
-            origin = getattr(message, "forward_origin", None)
-            fchat = getattr(origin, "chat", None) or getattr(origin, "sender_chat", None) or getattr(message, "forward_from_chat", None)
-            target = None
-            if fchat:
-                target = fchat.id
-            elif text.lstrip("-").isdigit():
-                target = int(text)
-            elif text.startswith("@") or "t.me/" in text:
-                target, parsed_thread = parse_target(text)
-                if target is None:
-                    await message.reply("❌ Dəvət linki (t.me/+...) ilə kanalı tapa bilmirəm — "
-                                        "kanaldan bir mesajı <b>yönləndir</b> və ya -100... ID göndər.", parse_mode="HTML")
-                    return
-            if target is None:
-                await message.reply("❌ @username, -100... ID, t.me linki göndər və ya kanaldan mesaj yönləndir.")
+            found, detected_thread, err = await depo_access.from_message(bot, message)
+            if err:
+                await message.reply(err, parse_mode="HTML")
                 return
-            try:
-                target_chat_id = int(target) if str(target).lstrip("-").isdigit() else target
-                chat = await bot.get_chat(target_chat_id)
-                bot_user = await bot.get_me()
-                member = await bot.get_chat_member(chat.id, bot_user.id)
-            except Exception as e:
-                await message.reply(f"❌ Kanal/qrup tapılmadı və ya bot orada deyil: <code>{escape(str(e))[:200]}</code>\n"
-                                    "<i>Botu əvvəlcə həmin kanala/qrupa əlavə edin.</i>",
-                                    parse_mode="HTML")
-                return
-
-            ctype = getattr(getattr(chat, "type", ""), "value", getattr(chat, "type", ""))
-            status = getattr(member, "status", "")
-            status = getattr(status, "value", status)
-
-            can_post = False
-            err_reason = ""
-
-            if status == "creator":
-                can_post = True
-            elif ctype == "channel":
-                if status == "administrator":
-                    post_right = getattr(member, "can_post_messages", None)
-                    if post_right is False:
-                        err_reason = "Botun kanalda <b>\"Mesaj göndərmək\"</b> (Post messages) icazəsi yoxdur."
-                    else:
-                        can_post = True
-                else:
-                    err_reason = "Bot bu kanalda <b>administrator</b> deyil."
-            else:
-                # Qrup / Supergroup / Forum
-                if status == "administrator":
-                    can_post = True
-                elif status == "member":
-                    can_post = getattr(member, "can_send_messages", True) is not False
-                    if not can_post:
-                        err_reason = "Botun bu qrupda mesaj göndərmək hüququ yoxdur."
-                elif status == "restricted":
-                    can_post = bool(getattr(member, "can_send_messages", False) and getattr(member, "can_send_audios", True))
-                    if not can_post:
-                        err_reason = "Botun bu qrupda mesaj/audio göndərmək hüququ məhdudlaşdırılıb."
-                else:
-                    err_reason = f"Bot bu qrupda deyil və ya uyğun statusda deyil (status: {status})."
-
-            if not can_post:
-                msg_txt = f"❌ {err_reason}\n\n" if err_reason else "❌ Bot bu çatda mesaj göndərə bilmir.\n\n"
-                if ctype == "channel":
-                    msg_txt += "Kanal ayarlarına daxil olun, botu <b>Administrator</b> edin və <b>\"Mesaj göndərmək\"</b> icazəsi verin."
-                else:
-                    msg_txt += "Botu qrupa əlavə edin və mesaj göndərmə icazəsi verin (tövsiyə olunur: admin edin)."
-                await message.reply(msg_txt, parse_mode="HTML")
-                return
-
-            detected_thread = parsed_thread or fwd_thread
+            chat, ref, ch_title = found.chat, found.ref, found.title
             th_note = f" (Mövzu #{detected_thread})" if detected_thread else ""
-            ref = f"@{chat.username}" if getattr(chat, "username", None) else str(chat.id)
-            ch_title = getattr(chat, "title", None) or ref
             if kind == "chat_yt":
                 audio_cache.set_depo_yt_channel(ref, ch_title)
                 if detected_thread:

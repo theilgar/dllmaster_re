@@ -67,6 +67,19 @@ logger = logging.getLogger(__name__)
 
 va = None
 
+
+async def _show_admin(cb, text, kb):
+    """Paneli admin üslubunda yeniləyir; Telegram xətası panelləri pozmur."""
+    with contextlib.suppress(Exception):
+        with ui_styled("admin"):
+            await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+
+
+async def _try_answer(cb, *args, **kw):
+    with contextlib.suppress(Exception):
+        await cb.answer(*args, **kw)
+
+
 def setup(context):
     global va
     dp, bot = context.dp, context.bot
@@ -958,29 +971,23 @@ def setup(context):
                      va_record.auto_chats().get(chat_id) or va_record.known_groups().get(chat_id) or str(chat_id))
             real_act = "stop" if act == "gstop" else "mark"
             if real_act == "stop":
-                with contextlib.suppress(Exception):
-                    await cb.answer("⏳ Qeyd saxlanılır...")
+                await _try_answer(cb, "⏳ Qeyd saxlanılır...")
             note = ""
             try:
                 note = await va.rec.action(chat_id, title, real_act, by=cb.from_user.full_name)
             except Exception as e:
                 note = f"❌ {e}"
             ans = note if note else None
-            with contextlib.suppress(Exception):
-                await cb.answer(ans[:190] if ans else None, show_alert=bool(note and note.startswith("❌")))
+            await _try_answer(cb, ans[:190] if ans else None, show_alert=bool(note and note.startswith("❌")))
             text, kb = va.rec.groups_view(note)
-            with contextlib.suppress(Exception):
-                with ui_styled("admin"):
-                    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+            await _show_admin(cb, text, kb)
             return
 
         # 🎯 Hədəf idarəetməsi (Tək rejim düyməsi, 1 fərdi hədəf, silmə düyməsi)
         if act == "dest":
             await cb.answer()
             text, kb = va.rec.target_view(chat_id, "vc")
-            with contextlib.suppress(Exception):
-                with ui_styled("admin"):
-                    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+            await _show_admin(cb, text, kb)
             return
 
         if act == "t_mode_cycle":
@@ -991,12 +998,9 @@ def setup(context):
                 "here": "👥 Bu çat",
             }
             note = f"📤 Rejim: {mode_names.get(nxt, nxt)}"
-            with contextlib.suppress(Exception):
-                await cb.answer(note)
+            await _try_answer(cb, note)
             text, kb = va.rec.target_view(chat_id, "vc", note)
-            with contextlib.suppress(Exception):
-                with ui_styled("admin"):
-                    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+            await _show_admin(cb, text, kb)
             return
 
         if act.startswith("t_mode:"):
@@ -1004,12 +1008,9 @@ def setup(context):
             va_record._put(va_record.S_DEST, mode)
             mode_names = {"target": "🎯 Fərdi Hədəf", "dm": "💬 Şəxsi çat", "here": "👥 Bu çat"}
             note = f"📤 Aktiv rejim: {mode_names.get(mode, mode)}"
-            with contextlib.suppress(Exception):
-                await cb.answer(note)
+            await _try_answer(cb, note)
             text, kb = va.rec.target_view(chat_id, "vc", note)
-            with contextlib.suppress(Exception):
-                with ui_styled("admin"):
-                    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+            await _show_admin(cb, text, kb)
             return
 
         if act == "tgt_del":
@@ -1021,12 +1022,9 @@ def setup(context):
                     ub.db.kv_del("logger", f"{s_key}_target_chat")
                     ub.db.kv_del("logger", f"{s_key}_target_topic")
             note = "🗑 Fərdi hədəf silindi"
-            with contextlib.suppress(Exception):
-                await cb.answer(note)
+            await _try_answer(cb, note)
             text, kb = va.rec.target_view(chat_id, "vc", note)
-            with contextlib.suppress(Exception):
-                with ui_styled("admin"):
-                    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+            await _show_admin(cb, text, kb)
             return
 
         if act in ("tgt_in", "tgt_in:vc"):
@@ -1045,9 +1043,7 @@ def setup(context):
                 InlineKeyboardButton(text="✖️ Ləğv et", callback_data=f"vrc:{chat_id}:dest")
             ]])
             await cb.answer()
-            with contextlib.suppress(Exception):
-                with ui_styled("admin"):
-                    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+            await _show_admin(cb, text, kb)
             return
 
         if act in ("tgt_tp", "tgt_tp:vc"):
@@ -1057,15 +1053,11 @@ def setup(context):
             view = await audit_open_topics("vc", cur_chat)
             if view is None:
                 text, kb = va.rec.target_view(chat_id, "vc", "⚠️ Forum deyil və ya topic-lər oxunmadı")
-                with contextlib.suppress(Exception):
-                    await cb.answer("⚠️ Forum deyil və ya topic-lər oxunmadı", show_alert=True)
+                await _try_answer(cb, "⚠️ Forum deyil və ya topic-lər oxunmadı", show_alert=True)
             else:
                 text, kb = va.rec.topic_view(chat_id, "vc")
-                with contextlib.suppress(Exception):
-                    await cb.answer("🧵 Topic-lər açıldı")
-            with contextlib.suppress(Exception):
-                with ui_styled("admin"):
-                    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+                await _try_answer(cb, "🧵 Topic-lər açıldı")
+            await _show_admin(cb, text, kb)
             return
 
         if act.startswith("tgt_tpset:"):
@@ -1076,8 +1068,7 @@ def setup(context):
             data = _AU_TOPICS.get("vc")
             if not data:
                 text, kb = va.rec.target_view(chat_id, "vc", "⚠️ Topic siyahısı yoxdur")
-                with contextlib.suppress(Exception):
-                    await cb.answer("⚠️ Topic siyahısı yoxdur", show_alert=True)
+                await _try_answer(cb, "⚠️ Topic siyahısı yoxdur", show_alert=True)
             else:
                 if pick == "g":
                     tid, tname = None, "General"
@@ -1088,12 +1079,9 @@ def setup(context):
                 lg.reset_stream_target(ub, "tr")
                 lg.reset_stream_target(ub, "spl")
                 note = f"🧵 Topic seçildi: {data['title'][:30]} › {tname}"
-                with contextlib.suppress(Exception):
-                    await cb.answer(f"🧵 {tname}"[:190])
+                await _try_answer(cb, f"🧵 {tname}"[:190])
                 text, kb = va.rec.target_view(chat_id, "vc", note)
-            with contextlib.suppress(Exception):
-                with ui_styled("admin"):
-                    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+            await _show_admin(cb, text, kb)
             return
 
         if act.startswith("tgt_pk:"):
@@ -1113,22 +1101,15 @@ def setup(context):
                     view = await audit_open_topics("vc", c, n)
                     if view is not None:
                         text, kb = va.rec.topic_view(chat_id, "vc", note + " — indi topic seç (və ya 💬 General)")
-                        with contextlib.suppress(Exception):
-                            await cb.answer(f"📌 {n}"[:190])
-                        with contextlib.suppress(Exception):
-                            with ui_styled("admin"):
-                                await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+                        await _try_answer(cb, f"📌 {n}"[:190])
+                        await _show_admin(cb, text, kb)
                         return
-                with contextlib.suppress(Exception):
-                    await cb.answer(note[:190])
+                await _try_answer(cb, note[:190])
                 text, kb = va.rec.target_view(chat_id, "vc", note)
             else:
-                with contextlib.suppress(Exception):
-                    await cb.answer("⚠️ Namizəd tapılmadı", show_alert=True)
+                await _try_answer(cb, "⚠️ Namizəd tapılmadı", show_alert=True)
                 text, kb = va.rec.target_view(chat_id, "vc", "⚠️ Namizəd tapılmadı")
-            with contextlib.suppress(Exception):
-                with ui_styled("admin"):
-                    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+            await _show_admin(cb, text, kb)
             return
 
         if act in ("tgt_me", "tgt_me:vc"):
@@ -1139,12 +1120,9 @@ def setup(context):
                 lg.reset_stream_target(ub, "tr")
                 lg.reset_stream_target(ub, "spl")
             note = "💾 Saved Messages-ə göndəriləcək"
-            with contextlib.suppress(Exception):
-                await cb.answer(note)
+            await _try_answer(cb, note)
             text, kb = va.rec.target_view(chat_id, "vc", note)
-            with contextlib.suppress(Exception):
-                with ui_styled("admin"):
-                    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+            await _show_admin(cb, text, kb)
             return
 
         if act in ("tgt_test", "tgt_test:vc"):
@@ -1154,20 +1132,15 @@ def setup(context):
             except Exception as e:
                 note = f"❌ {e}"
             clean_note = re.sub(r"<[^>]+>", "", note) if note else ""
-            with contextlib.suppress(Exception):
-                await cb.answer(clean_note[:190], show_alert=clean_note.startswith("❌"))
+            await _try_answer(cb, clean_note[:190], show_alert=clean_note.startswith("❌"))
             text, kb = va.rec.target_view(chat_id, "vc", note)
-            with contextlib.suppress(Exception):
-                with ui_styled("admin"):
-                    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+            await _show_admin(cb, text, kb)
             return
 
         if act.startswith("tgt_s:"):
             await cb.answer()
             text, kb = va.rec.target_view(chat_id, "vc")
-            with contextlib.suppress(Exception):
-                with ui_styled("admin"):
-                    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+            await _show_admin(cb, text, kb)
             return
 
         if act == "list" or (chat_id == 0 and act in ("music", "br", "timer", "silent", "keep", "tr", "split", "pdm", "refresh")):
@@ -1185,8 +1158,7 @@ def setup(context):
                 except Exception as e:
                     note = f"❌ {e}"
             ans = note if note else ("🔄 Yeniləndi" if act in ("list", "refresh") else None)
-            with contextlib.suppress(Exception):
-                await cb.answer(ans[:190] if ans else None, show_alert=bool(note and note.startswith("❌")))
+            await _try_answer(cb, ans[:190] if ans else None, show_alert=bool(note and note.startswith("❌")))
             text, kb = va.rec.groups_view(note)
         else:
             title = (va.rec.sessions[chat_id].title if chat_id in va.rec.sessions else
@@ -1194,8 +1166,7 @@ def setup(context):
             note = ""
             if act not in ("open", "refresh"):
                 if act in ("start", "stop"):
-                    with contextlib.suppress(Exception):
-                        await cb.answer("⏳ Gözləyin...", show_alert=False)
+                    await _try_answer(cb, "⏳ Gözləyin...", show_alert=False)
                     try:
                         note = await va.rec.action(chat_id, title, act, by=cb.from_user.full_name)
                     except Exception as e:
@@ -1208,16 +1179,12 @@ def setup(context):
                         logger.warning(f"⏺ panel {act} ({chat_id}): {e}")
                         note = f"❌ {e}"
                     ans = note if note else None
-                    with contextlib.suppress(Exception):
-                        await cb.answer(ans[:190] if ans else None, show_alert=bool(note and note.startswith("❌")))
+                    await _try_answer(cb, ans[:190] if ans else None, show_alert=bool(note and note.startswith("❌")))
             else:
                 ans = "🔄 Yeniləndi" if act == "refresh" else None
-                with contextlib.suppress(Exception):
-                    await cb.answer(ans)
+                await _try_answer(cb, ans)
             text, kb = await va.rec.panel(chat_id, title, note, from_menu=(chat_id < 0), owner=is_creator_user)
-        with contextlib.suppress(Exception):
-            with ui_styled("admin"):
-                await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+        await _show_admin(cb, text, kb)
 
     # ⚡ avtomatik rejim: bot qrupda "səsli yayım başladı / bitdi" servis mesajını görür
     # (asistan hesabının öz hadisəsi də var — va_record.Recorder.attach; ikisindən hansı tez gəlsə)

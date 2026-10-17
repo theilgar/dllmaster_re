@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 ADMIN_PREFIXES = ("menu:", "df:", "dt:", "fx:", "htop:", "lg:", "pm:", "bk:", "ubacc:", "va:", "gh:", "ghf:",
                   "ghs:", "ghu:", "hgs:", "ae:", "botrestart:", "tgl:", "scan:", "dc:", "hc:", "is:", "tr:", "ds:", "ar:", "dp:", "px:", "ln:", "pla:", "tf:", "hg:", "dh:", "kb_btn:", "ui:",
-                  "test_mp3:", "mp3_u:", "mp3_g:", "codec:", "gmenu:", "grp:", "umenu:", "vrc:", "ubm:", "ubc:", "meta:", "shz:", "tip:", "tip_prompt:", "pm_grp:", "vj:", "vp:", "mp3_lk:", "vq:", "vr:")
+                  "test_mp3:", "mp3_u:", "mp3_g:", "codec:", "gmenu:", "grp:", "umenu:", "vrc:", "ubm:", "ubp:", "ubc:", "meta:", "shz:", "tip:", "tip_prompt:", "pm_grp:", "vj:", "vp:", "mp3_lk:", "vq:", "vr:")
 MAX_MAP = 500
 
 # Yalnız bot sahibinin panelləri — yoxlama bir yerdədir (əvvəl hər handler-in əvvəlində eyni 3 sətir idi).

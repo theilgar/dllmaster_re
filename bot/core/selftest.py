@@ -106,7 +106,11 @@ async def _depo(ctx):
     cid = await audio_cache.depo_chat_id(ctx.bot)
     if not cid:
         return False, (audio_cache.depo_status().get("error") or "kanal əlçatan deyil")[:80]
-    return True, f"əlçatandır ({cid})"
+    from bot.core import depo_shards
+    extra = depo_shards.extras()
+    ok = sum(1 for e in extra if (i := depo_shards._ids.get(e["ref"].strip().lower())) and i.get("id")
+             and depo_shards.usable(i["id"]))
+    return True, f"əlçatandır ({cid})" + (f" · əlavə kanal: {ok}/{len(extra)} hazır" if extra else "")
 
 
 async def _shazam(ctx):

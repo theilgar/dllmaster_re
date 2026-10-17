@@ -71,7 +71,7 @@ TEXT_WAITS: tuple[tuple[dict[str, Any], set[str] | None], ...] = (
     (yt_inp, {"await_bp"}),
     (perf_inp, None),
     (rec_inp, None),
-    (yta_inp, {"await_name"}),
+    (yta_inp, {"await_name", "await_lname", "await_lurl"}),
     (upd_inp, {"await_sudo"}),
     (inv_inp, {"await_invite_days"}),
     (wprem_inp, {"await_wprem_days", "await_wprem_date"}),

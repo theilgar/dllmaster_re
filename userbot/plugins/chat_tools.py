@@ -13,7 +13,7 @@ Komandalar:
      • .kickme / .leave / .skickme    — qrupdan çıxmaq (normal və səssiz)
 
   3. Qrup Üzvləri & İdarəetmə:
-     • .members [filtr]               — üzvləri siyahılayır (.tagall, admins, bots, etc.)
+     • .members [filtr]               — üzvləri siyahılayır (admins, bots, etc.)
      • .kick                          — istifadəçini qrupdan çıxardır
      • .add                           — istifadəçini qrupa əlavə edir
      • .promote / .promote all        — admin təyin edir (yetki paneli ilə)
@@ -566,6 +566,21 @@ def register(ub):
     # ═════════════════════════════════════════════════════════
     # B) Toplu Mesaj Silmə (.purge, .purgeme)
     # ═════════════════════════════════════════════════════════
+    PURGE_OPTIONS = [{
+        "key": "order", "label": "🔀 Silmə sırası", "default": "new",
+        "choices": [("new", "🔽 Yenidən köhnəyə (Z → A)"), ("old", "🔼 Köhnədən yeniyə (A → Z)")],
+        "note": "Mesajlar hansı ardıcıllıqla silinsin. Standart: ən sonuncu mesajdan başlayır.",
+    }]
+    for _name in ("purge", "purgeme"):
+        ub.state.setdefault("cmd_options", {})[_name] = PURGE_OPTIONS
+
+    def purge_order(cmd: str) -> str:
+        try:
+            return ub.db.kv_get("cmdopt", f"{cmd}:order", "new")
+        except Exception as e:
+            logger.debug(f"purge sırası oxunmadı: {e}")
+            return "new"
+
     async def handle_purge(event, force_mine: bool = False):
         client = event.client
         raw_args = (event.pattern_match.group(1) or "").strip().split()
@@ -576,7 +591,12 @@ def register(ub):
                 count = int(arg)
                 break
 
-        if count is None and (not event.is_reply or not event.reply_to_msg_id):
+        has_reply = bool(event.is_reply and event.reply_to_msg_id)
+        all_mine = force_mine and count is None and not has_reply
+        if all_mine:                                  # .purgeme — saysız, reply-sız: çatdakı öz mesajların (maks. PURGE_MAX_MESSAGES)
+            count = PURGE_MAX_MESSAGES
+
+        if count is None and not has_reply:
             cmd = ".purgeme" if force_mine else ".purge"
             await temp_edit(event, f"ℹ️ <b>İstifadə:</b> <code>{cmd} 50</code> və ya mesaja reply edib <code>{cmd}</code> yazın.", delay=3)
             return
@@ -598,7 +618,7 @@ def register(ub):
             if not others_ok:
                 mine_only = True
 
-        await safe_edit(event, "🧹 <i>Mesajlar toplanır...</i>")
+        await safe_edit(event, "🧹 <i>Öz mesajların toplanır...</i>" if all_mine else "🧹 <i>Mesajlar toplanır...</i>")
         ids = []
         total_seen = 0
         try:
@@ -624,6 +644,10 @@ def register(ub):
             if not to_delete:
                 await temp_edit(event, "ℹ️ <i>Silinəcək mesaj tapılmadı.</i>", delay=2)
                 return
+
+            # Sıra .menu → komanda → ⚙️ Ayarlar-dan seçilir: "new" — ən sonuncudan (ən böyük ID) əvvələ (standart),
+            # "old" — ən köhnədən (ən kiçik ID) yeniyə (A → Z)
+            to_delete.sort(reverse=purge_order("purgeme" if force_mine else "purge") != "old")
 
             total = len(to_delete)
             deleted = 0
@@ -660,7 +684,9 @@ def register(ub):
     @ub.command("purgeme", pattern=r"^\.(?:purgeme|pme)(?:\s+(.+))?$",
                 help=("yalnız öz mesajlarını silmək",
                       "Cari çatdan yalnız sizin göndərdiyiniz mesajları silir.\n\n"
-                      "<b>İstifadə:</b>\n• <code>.purgeme 50</code>\n• reply → <code>.purgeme</code>"))
+                      "<b>İstifadə:</b>\n• <code>.purgeme</code> — saysız: çatdakı öz mesajların (ən çox "
+                      f"{PURGE_MAX_MESSAGES} mesaj axtarılır)\n• <code>.purgeme 50</code> — son 50 öz mesajın\n"
+                      "• reply → <code>.purgeme</code> — həmin mesajdan indiyə qədər öz mesajların"))
     async def on_purgeme(event):
         await handle_purge(event, force_mine=True)
 
@@ -1518,10 +1544,10 @@ def register(ub):
 
     @ub.command(
         "members",
-        pattern=r"^\.(?:members|tagall|users)(?:\s+(.+))?$",
+        pattern=r"^\.(?:members|users)(?:\s+(.+))?$",
         help=("qrup üzvlərini siyahılamaq",
-              "Qrupdakı üzvləri çıxarır və ya tag edir.\n\n"
-              "<b>İstifadə:</b>\n• <code>.members</code>\n• <code>.tagall</code>\n• <code>.members bots</code>\n• <code>.members admins</code>"))
+              "Qrupdakı üzvləri siyahılayır.\n\n"
+              "<b>İstifadə:</b>\n• <code>.members</code>\n• <code>.members bots</code>\n• <code>.members admins</code>"))
     async def on_members(event):
         if event.is_private:
             await safe_edit(event, "❌ Bu əmr yalnız <b>qruplarda</b> işlədilə bilər.")

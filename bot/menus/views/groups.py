@@ -62,23 +62,29 @@ async def user_menu_view(bot, user) -> tuple[str, InlineKeyboardMarkup]:
         "<i>Bölmələrdən birini seçin:</i>"
     )
 
-    rows = []
-    rows.append([InlineKeyboardButton(text="🎛 Audio formatı (/codec)", callback_data="codec:panel")])
+    try:
+        from bot.core import menu_button
+        kb_state = menu_button.STYLE_LABEL[await asyncio.to_thread(menu_button.kb_style, uid)]
+        shown = menu_button.um_on                       # sahib /menubutton → 👤 İstifadəçi menyusu-ndan seçir
+    except Exception:
+        kb_state, shown = "🔴 Deaktiv", (lambda key: True)
 
     from common.database import is_invite_enabled
 
-    if is_invite_enabled():
-        rows.append([InlineKeyboardButton(text="🎁 Dəvət et & Premium qazan", callback_data="umenu:invite")])
-
-    rows.append([
-        InlineKeyboardButton(text="👥 Qruplarım", callback_data="umenu:groups"),
-        InlineKeyboardButton(text="💎 Premium", callback_data="umenu:premium"),
-    ])
-    rows.append([InlineKeyboardButton(text="🔎 Musiqi axtar", switch_inline_query="")])
-    rows.append([
-        InlineKeyboardButton(text="❓ Əmrlər və bələdçi", callback_data="umenu:help"),
-        InlineKeyboardButton(text="🌐 Dil", callback_data="lang:menu"),
-    ])
+    I = InlineKeyboardButton
+    buttons = {
+        "codec": I(text="🎛 Audio formatı (/codec)", callback_data="codec:panel"),
+        "keyboard": I(text=f"⌨️ Klaviatura: {kb_state}", callback_data="mbtn:kb:menu"),
+        "invite": I(text="🎁 Dəvət et & Premium qazan", callback_data="umenu:invite"),
+        "groups": I(text="👥 Qruplarım", callback_data="umenu:groups"),
+        "premium": I(text="💎 Premium", callback_data="umenu:premium"),
+        "search": I(text="🔎 Musiqi axtar", switch_inline_query=""),
+        "help": I(text="❓ Əmrlər və bələdçi", callback_data="umenu:help"),
+        "lang": I(text="🌐 Dil", callback_data="lang:menu"),
+    }
+    layout = (("codec",), ("keyboard",), ("invite",), ("groups", "premium"), ("search",), ("help", "lang"))
+    visible = lambda key: shown(key) and (key != "invite" or is_invite_enabled())
+    rows = [r for r in ([buttons[k] for k in line if visible(k)] for line in layout) if r]
     rows.append([InlineKeyboardButton(text="✖️ Bağla", callback_data="umenu:close")])
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 

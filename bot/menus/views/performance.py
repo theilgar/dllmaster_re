@@ -34,10 +34,6 @@ def perf_button_label() -> str:
     return f"⚙️ Performans · {icon} {cp.CORES} nüvə" + (f" · ⚠️ {warn}" if warn else "")
 
 
-def _ms(sec: float) -> str:
-    return f"{sec * 1000:.0f} ms" if sec < 1 else f"{sec:.1f} san"
-
-
 PERF_PICK_CONFIG = {
     "c": {
         "title": "🎯 CPU hədəfi",

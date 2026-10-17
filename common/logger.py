@@ -68,23 +68,6 @@ class _RedactingQueueHandler(QueueHandler):
         return record
 
 
-def cleanup_old_logs(log_dir: str = "bot_logs", max_days: int = 7):
-    """Köhnə (max_days gündən çox) log fayllarını təmizləyir."""
-    if not os.path.isdir(log_dir):
-        return
-    cutoff = datetime.datetime.now() - datetime.timedelta(days=max_days)
-    for fname in os.listdir(log_dir):
-        if not fname.startswith("bot(") or ".log" not in fname:
-            continue
-        fpath = os.path.join(log_dir, fname)
-        try:
-            mtime = datetime.datetime.fromtimestamp(os.path.getmtime(fpath))
-            if mtime < cutoff:
-                os.remove(fpath)
-        except OSError:
-            pass
-
-
 def enforce_log_limits(log_dir: str = "bot_logs", max_days: int | None = None, max_total_mb: float | None = None) -> int:
     """Log qovluğunu məhdudlaşdırır (başlanğıcda və dövri çağırılır). Silinən fayl sayını qaytarır.
       • bot(<tarix>).log* — LOG_RETENTION_DAYS-dən (default 7) köhnələr silinir

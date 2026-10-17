@@ -233,9 +233,13 @@ class QueueMixin:
     async def ytm_add_items(self, items, front: bool = False) -> tuple:
         """(növbəyə əlavə, artıq depoda) — depoda olanlar növbəyə heç düşmür.
         front=True — 🌍 seçilmiş ölkənin ifaçısı: növbənin əvvəlinə."""
-        fresh = [it for it in items if it["vid"] not in self.ytm_seen]
         if len(self.ytm_seen) > YTM_SEEN_CAP:
             self.ytm_seen.clear()
+        fresh = []
+        for it in items:                            # paralel skaner yuvaları eyni mahnını iki dəfə növbəyə qoymasın:
+            if it["vid"] not in self.ytm_seen:      # "gördüm" işarəsi await-dən ƏVVƏL qoyulur
+                self.ytm_seen.add(it["vid"])
+                fresh.append(it)
 
         def check():
             res = []
@@ -255,7 +259,12 @@ class QueueMixin:
                 res.append(False)
             return res
 
-        flags = await asyncio.to_thread(check) if fresh else []
+        try:
+            flags = await asyncio.to_thread(check) if fresh else []
+        except BaseException:
+            for it in fresh:                        # yoxlama alınmadı — mahnılar itməsin, növbəti dəfə yenidən baxılsın
+                self.ytm_seen.discard(it["vid"])
+            raise
         added = in_depo = 0
         new = []
         for it, cached in zip(fresh, flags):

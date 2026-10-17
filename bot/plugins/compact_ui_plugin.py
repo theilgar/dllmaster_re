@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 PRIORITY = 6                       # tez yüklənsin — digər plugin-lərin ilk mesajları da yığcam olsun
 EXTRA_PREFIXES = (
     "ui:", "kb_btn:", "test_mp3:", "mp3_u:", "mp3_g:", "codec:", "gmenu:", "grp:",
-    "ubm:", "ubc:", "meta:", "shz:", "tip:", "tip_prompt:", "pm_grp:", "vj:", "vp:", "mp3_lk:", "vq:", "vr:"
+    "ubm:", "ubp:", "ubc:", "meta:", "shz:", "tip:", "tip_prompt:", "pm_grp:", "vj:", "vp:", "mp3_lk:", "vq:", "vr:"
 )
 SKIP_CALLBACKS = ("menu:bc_send",)  # 📢 broadcast önizləməsi — istifadəçilərin görəcəyi kimi qalmalıdır
 SEP_RE = re.compile(r"^\s*[─━═—–\-_=·•.]{4,}\s*$")

@@ -304,12 +304,14 @@ def _firefox_profiles(root: str) -> list:
 
 def _chromium_profiles(root: str) -> list:
     names = {}
-    try:
-        with open(os.path.join(root, "Local State"), encoding="utf-8") as f:
-            info = json.load(f).get("profile", {}).get("info_cache", {}) or {}
-        names = {k: (v or {}).get("name") or k for k, v in info.items()}
-    except Exception as _e:
-        logger.debug("udulan xəta [bot/core/webprofile.py:223]: %r", _e)
+    local_state = os.path.join(root, "Local State")
+    if os.path.isfile(local_state):          # Flatpak və s. boş qovluqlarda Local State olmur — bu xəta deyil, ad sadəcə qovluq adıdır
+        try:
+            with open(local_state, encoding="utf-8") as f:
+                info = json.load(f).get("profile", {}).get("info_cache", {}) or {}
+            names = {k: (v or {}).get("name") or k for k, v in info.items()}
+        except (OSError, ValueError, AttributeError) as _e:
+            logger.debug("Chromium 'Local State' oxunmadı (%s): %r", local_state, _e)
     out = []
     cands = [root] + [d for d in glob.glob(os.path.join(root, "*")) if os.path.isdir(d)]
     for d in cands:
