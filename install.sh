@@ -121,7 +121,7 @@ fi
 
 # ── 5) Python mühiti ──
 info ".venv və Python paketləri..."
-run "python3 -m venv .venv"
+run "${DLM_PYTHON:-python3} -m venv .venv"      # restore_vds.sh köhnə sistem Python-u üçün uv-nin 3.14-ünü verir
 run ".venv/bin/pip install --upgrade pip wheel"
 run ".venv/bin/pip install -r requirements.txt"
 ok "Python paketləri hazırdır"

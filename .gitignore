@@ -70,3 +70,8 @@ data/remote_cookies/
 
 # Əl ilə hazırlanmış layihə yedəkləri (GB-larla; GitHub qəbul etmir)
 dlm_backup*
+
+# Anti-Delete media keşi (GB-larla, 24 saatdan sonra silinir) və cookie ixracları
+data/antidelete_media/
+data/shazam_tmp/
+data/yt_accounts/
