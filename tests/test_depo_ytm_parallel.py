@@ -224,12 +224,13 @@ def crawler(monkeypatch):
     return c
 
 
-def test_claim_gives_each_slot_a_different_artist_and_release_frees_it(crawler):
-    a, b, c = crawler._claim(), crawler._claim(), crawler._claim()
-    assert [a[0], b[0], c[0]] == ["UC1", "UC2", "UC3"] and crawler._claim() is None
+@pytest.mark.asyncio
+async def test_claim_gives_each_slot_a_different_artist_and_release_frees_it(crawler):
+    a, b, c = await crawler._claim(), await crawler._claim(), await crawler._claim()
+    assert [a[0], b[0], c[0]] == ["UC1", "UC2", "UC3"] and await crawler._claim() is None
     assert crawler.stats["artist"] == "Bir · İki · Üç"
     crawler._release("UC2")
-    assert crawler.stats["artist"] == "Bir · Üç" and crawler._claim()[0] == "UC2"
+    assert crawler.stats["artist"] == "Bir · Üç" and (await crawler._claim())[0] == "UC2"
     crawler._release("UC1")
     crawler._release("UC3")
     crawler._release("UC2")
@@ -303,8 +304,13 @@ async def test_only_one_slot_seeds_when_nothing_is_pending(monkeypatch):
         return [("UCS", "Seed")]
     monkeypatch.setattr(c, "_seed_sync", seed)
     monkeypatch.setattr(c, "add_artists", lambda pairs, prio=0: len(pairs))
-    monkeypatch.setattr(c, "_artist_sync", lambda aid, stop: ("Seed", [], []))
-    monkeypatch.setattr(c, "_mark", lambda *a, **kw: None)
+
+    def slow_sync(aid, stop):
+        import time
+        time.sleep(0.15)                                            # oxuyan yuva məşğuldur — digərləri bunu görməlidir
+        return "Seed", [], []
+    monkeypatch.setattr(c, "_artist_sync", slow_sync)
+    monkeypatch.setattr(c, "_mark", lambda aid, *a, **kw: pending[:] and pending.pop(0))   # oxunan ifaçı növbədən çıxır
 
     async def add_items(items, front=False):
         return 0, 0
@@ -469,3 +475,51 @@ def test_main_depo_panel_shows_the_scanner_button_and_the_parallel_count(f):
     assert "Bir · İki</i> oxunur (3 paralel)" in text
     row = next(r for r in kb.inline_keyboard if any(b.callback_data == "df:yp" for b in r))
     assert len(row) == 2                                                   # 🎵 YT Music + 🔎 Skaner — sətirdə ≤ 2
+
+
+@pytest.mark.asyncio
+async def test_concurrent_claims_never_hand_out_the_same_artist_and_dont_block_the_loop(crawler, monkeypatch):
+    """Sorğu thread-dədir (event loop bloklanmır), amma paralel yuvalar yenə fərqli ifaçı alır."""
+    import threading
+    main = threading.get_ident()
+    seen_threads = []
+    real = crawler._next_pending
+
+    def spy(busy=None):
+        seen_threads.append(threading.get_ident())
+        return real(busy)
+    monkeypatch.setattr(crawler, "_next_pending", spy)
+    rows = await asyncio.gather(*[crawler._claim() for _ in range(4)])
+    assert sorted(r[0] for r in rows if r) == ["UC1", "UC2", "UC3"] and rows.count(None) == 1
+    assert seen_threads and main not in seen_threads                         # baza sorğusu event loop thread-ində deyil
+
+
+@pytest.mark.asyncio
+async def test_a_slot_does_not_sleep_an_hour_if_the_other_slot_just_added_artists(monkeypatch):
+    """B boş görüb ayrılmaq üzrə ikən A bitib əlaqəli ifaçıları əlavə edib → B son cəhdlə onları götürür (əvvəl 1 saat yatırdı)."""
+    c = C.YtmCrawler()
+    pending = []
+    calls = {"n": 0}
+
+    class DB:
+        def sql_one(self, sql, params=()):
+            busy = set(params[0]) if params else set()
+            return next((r for r in pending if r[0] not in busy), None)
+    monkeypatch.setattr(C, "get_db", lambda: DB())
+    monkeypatch.setattr(c, "_requeue_old", lambda: 0)
+    monkeypatch.setattr(c, "_seed_sync", lambda ua, stop: [])
+    monkeypatch.setattr(c, "add_artists", lambda pairs, prio=0: 0)
+    monkeypatch.setattr(c, "_artist_sync", lambda aid, stop: ("X", [], []))
+    monkeypatch.setattr(c, "_mark", lambda *a, **kw: None)
+    real_claim = C.YtmCrawler._claim
+
+    async def claim(self):
+        calls["n"] += 1
+        if calls["n"] == 3:                                          # 1-ci: ilkin, 2-ci: kilid içində → boş; sonra ifaçı əlavə olunur
+            pending.append(("UCNEW", "Yeni", 0))
+        return await real_claim(self)
+    monkeypatch.setattr(C.YtmCrawler, "_claim", claim)
+
+    async def add_items(items, front=False):
+        return 0, 0
+    assert await c.step(add_items, lambda: [], threading.Event()) is True      # False (saatlıq yuxu) yox

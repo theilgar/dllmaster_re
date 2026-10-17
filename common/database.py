@@ -133,6 +133,9 @@ _SCHEMA = [
     )""",
     "CREATE INDEX IF NOT EXISTS idx_depo_ytm_state ON depo_ytm(state, ts)",
     "CREATE INDEX IF NOT EXISTS idx_depo_ytm_pending ON depo_ytm(state, prio DESC, seq)",
+    # YT Music skaneri `ORDER BY COALESCE(prio, 0) DESC, seq` ilə seçir — ifadə indeksi olmadan 76 min sətir hər dəfə sıralanırdı
+    # (88 ms, yük altında 2–8 san.); indekslə 0.6 ms.
+    "CREATE INDEX IF NOT EXISTS idx_depo_ytm_pick ON depo_ytm(state, (COALESCE(prio, 0)) DESC, seq)",
     """CREATE TABLE IF NOT EXISTS depo_failed (
         key TEXT PRIMARY KEY, title TEXT, item TEXT, err TEXT, tries INTEGER, ts BIGINT
     )""",

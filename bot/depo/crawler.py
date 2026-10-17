@@ -285,6 +285,7 @@ class YtmCrawler:
         self.filler = None
         self._inflight = {}                 # aid → ad: hazırda oxunan ifaçılar (paralel yuvalar eyni ifaçını götürmür)
         self._seed_lock = None              # tənbəl: event loop-a bağlıdır
+        self._claim_lock = None
 
     def client(self):
         if self.yt is None:
@@ -329,19 +330,24 @@ class YtmCrawler:
         with get_db().sql() as cur:
             cur.execute("UPDATE depo_ytm SET prio = 0 WHERE prio > 0")
 
-    def _next_pending(self):
-        busy = list(self._inflight)
+    def _next_pending(self, busy=None):
+        busy = list(self._inflight) if busy is None else list(busy)
         strict = " AND COALESCE(prio, 0) > 0" if self.filler and self.filler.country_strict() else ""
         return get_db().sql_one(
             "SELECT aid, name, COALESCE(prio, 0) FROM depo_ytm WHERE state = 0" + strict
             + " AND NOT (aid = ANY(%s::text[])) ORDER BY COALESCE(prio, 0) DESC, seq LIMIT 1", (busy,))
 
-    def _claim(self):
-        """Növbəti ifaçını götürür və 'oxunur' işarələyir (await olmadığı üçün yuvalar arasında atomikdir)."""
-        row = self._next_pending()
-        if row:
-            self._inflight[row[0]] = row[1] or row[0]
-            self._show_reading()
+    async def _claim(self):
+        """Növbəti ifaçını götürür və 'oxunur' işarələyir. Baza sorğusu thread-dədir (əvvəl event loop-u saniyələrlə
+        bloklayırdı: «yavaş baza sorğusu 8606 ms ← _next_pending»); yuvalar eyni ifaçını götürməsin deyə sorğu + işarə
+        bir kilid altındadır."""
+        if self._claim_lock is None:
+            self._claim_lock = asyncio.Lock()
+        async with self._claim_lock:
+            row = await asyncio.to_thread(self._next_pending, list(self._inflight))
+            if row:
+                self._inflight[row[0]] = row[1] or row[0]
+                self._show_reading()
         return row
 
     def _release(self, aid):
@@ -503,12 +509,12 @@ class YtmCrawler:
             s in text for s in ("429", "too many", "connection", "timed out", "timeout", "reset", "aborted", "rate"))
 
     async def step(self, add_items, user_artists_fn, stop) -> bool:
-        row = self._claim()
+        row = await self._claim()
         if not row:
             if self._seed_lock is None:
                 self._seed_lock = asyncio.Lock()
             async with self._seed_lock:                 # paralel yuvalardan yalnız biri seed edir / köhnələri qaytarır
-                row = self._claim()                     # gözləyərkən başqa yuva artıq doldurmuş ola bilər
+                row = await self._claim()                     # gözləyərkən başqa yuva artıq doldurmuş ola bilər
                 if not row and not self._inflight:      # başqa yuva ifaçı oxuyursa — onun 'əlaqəli ifaçıları' gələ bilər
                     n = self._requeue_old()
                     if not n:
@@ -518,10 +524,12 @@ class YtmCrawler:
                         n = await asyncio.to_thread(self.add_artists, pairs, seed_prio)
                         logger.info(f"🎵 YT Music seed: {len(pairs)} ifaçı ({n} yeni, prio={seed_prio})")
                     self.stats["note"] = ""
-                    row = self._claim()
+                    row = await self._claim()
             if not row and self._inflight:
                 await asyncio.sleep(2)                  # başqa yuva hələ oxuyur — yeni ifaçılar düşə bilər, saatlıq gözləmə yox
                 return True
+            if not row:
+                row = await self._claim()               # son cəhd: o arada başqa yuva bitib «əlaqəli ifaçıları» əlavə etmiş ola bilər
             if not row:
                 self.stats["note"] = "yeni ifaçı yoxdur — 1 saat sonra yenidən"
                 return False
