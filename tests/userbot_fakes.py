@@ -24,6 +24,18 @@ class FakeUB:
             return fn
         return deco
 
+    def section(self, key, label, order=50):
+        def deco(render):
+            self.__dict__.setdefault("sections", {}).setdefault(key, {}).update(label=label, order=order, render=render)
+            return render
+        return deco
+
+    def on_section(self, key):
+        def deco(handle):
+            self.__dict__.setdefault("sections", {}).setdefault(key, {})["handle"] = handle
+            return handle
+        return deco
+
     def track(self, chat_id, kind, task):
         self.tracked.append(task)
 

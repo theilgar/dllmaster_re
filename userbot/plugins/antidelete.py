@@ -7,6 +7,9 @@ Komandalar:
   • .antidelete all                       — həm şəxsi, həm qruplarda aktiv et
   • .antidelete media on / off            — media (şəkil, səs, video qeyd) saxlanmasını aç / bağla
   • .antidelete clear                     — keşlənmiş mesajları və müvəqqəti faylları təmizlə
+
+İnline panel: .antidelete (arqumentsiz) düymələrlə kart açır; eyni panel .menu → ⚡ Funksiyalar → 🛡 Anti-Delete bölməsindədir
+(aç / söndür, DM / bütün çatlar, media, keşi təmizlə, statistikanı sıfırla).
 """
 import asyncio
 import collections
@@ -14,10 +17,11 @@ from html import escape
 import os
 import time
 
+from aiogram.types import InlineKeyboardMarkup
 from telethon import events
 from telethon.tl.types import User
 
-from userbot.core.userbot_api import logger, plain_name, safe_edit, temp_edit
+from userbot.core.userbot_api import Out, logger, plain_name, safe_edit, temp_edit
 from userbot.core.userbot_db import get_udb, run_bg
 
 NS, KEY = "antidelete", "cfg"
@@ -90,6 +94,86 @@ def _clean_old_media():
                     pass
     except Exception as e:
         logger.debug(f"antidelete media təmizlənmədi: {e}")
+
+
+def clear_cache() -> tuple:
+    """Yaddaş keşini və media qovluğunu boşaldır → (mesaj sayı, fayl sayı)."""
+    n_msgs, n_files = len(_msg_cache), 0
+    _msg_cache.clear()
+    _mid_to_chat.clear()
+    if os.path.isdir(MEDIA_CACHE_DIR):
+        for f in os.listdir(MEDIA_CACHE_DIR):
+            try:
+                os.remove(os.path.join(MEDIA_CACHE_DIR, f))
+                n_files += 1
+            except OSError:
+                pass
+    return n_msgs, n_files
+
+
+def media_cache_stats() -> tuple:
+    """(fayl sayı, MB) — keşdəki media faylları."""
+    n = size = 0
+    if os.path.isdir(MEDIA_CACHE_DIR):
+        for f in os.listdir(MEDIA_CACHE_DIR):
+            try:
+                size += os.path.getsize(os.path.join(MEDIA_CACHE_DIR, f))
+                n += 1
+            except OSError:
+                pass
+    return n, size / 1048576
+
+
+def status_text(state: AntiDeleteState, note: str = "") -> str:
+    c = state.cfg
+    n_media, mb = media_cache_stats()
+    text = (
+        "🛡 <b>Anti-Delete Monitoru</b>\n\n"
+        f"• <b>Status:</b> {'🟢 Aktiv' if c.get('on', False) else '🔴 Söndürülüb'}\n"
+        f"• <b>İzləmə Sahəsi:</b> {'🔒 Yalnız Şəxsi (DM)' if c.get('mode') == 'dm' else '🌐 Bütün Çatlar'}\n"
+        f"• <b>Media Tutma:</b> {'✅ Aktiv' if c.get('save_media', True) else '🔴 Söndürülüb'}\n"
+        f"• <b>Keşdəki Mesajlar:</b> {len(_msg_cache)} · media: {n_media} fayl ({mb:.1f} MB)\n"
+        f"• <b>Tutulan Silinmiş Mesajlar:</b> {c.get('caught', 0)} ədəd\n"
+        f"• <b>Tutulan Medialar:</b> {c.get('media_caught', 0)} ədəd\n\n"
+        "<i>Silinən mesajlar «Saved Messages»-ə göndərilir.</i>"
+    )
+    return text + (f"\n\n{note}" if note else "")
+
+
+def layout(state: AntiDeleteState) -> list:
+    """[[(yazı, əməl), ...], ...] — həm .menu bölməsi, həm .antidelete kartı eyni düymələri çəkir."""
+    c = state.cfg
+    dm = c.get("mode") == "dm"
+    return [
+        [(f"Anti-Delete: {'🟢 Aktiv' if c.get('on', False) else '🔴 Deaktiv'}", "tg")],
+        [(("✅ " if dm else "") + "🔒 Yalnız DM", "dm"), (("" if dm else "✅ ") + "🌐 Bütün çatlar", "all")],
+        [(f"📎 Media: {'🟢' if c.get('save_media', True) else '🔴'}", "media"), ("🧹 Keşi təmizlə", "clear")],
+        [("♻️ Statistikanı sıfırla", "stats0"), ("🔄 Yenilə", "r")],
+    ]
+
+
+def apply(state: AntiDeleteState, action: str) -> str:
+    """Düymə əməli → bildiriş mətni (tanınmayan / «r» — boş). Ayarlar dərhal bazaya yazılır."""
+    c = state.cfg
+    if action == "tg":
+        c["on"] = not c.get("on", False)
+        note = "✅ Anti-Delete aktivləşdirildi" if c["on"] else "🔴 Anti-Delete söndürüldü"
+    elif action in ("dm", "all"):
+        c["mode"] = action
+        note = "🔒 Rejim: yalnız şəxsi (DM) söhbətlər" if action == "dm" else "🌐 Rejim: bütün çatlar (DM + qruplar)"
+    elif action == "media":
+        c["save_media"] = not c.get("save_media", True)
+        note = "📎 Media saxlanır" if c["save_media"] else "📎 Media saxlanmır (yalnız mətn)"
+    elif action == "clear":
+        n_msgs, n_files = clear_cache()
+        return f"🧹 Keş təmizləndi: {n_msgs} mesaj, {n_files} media faylı"
+    elif action == "stats0":
+        c["caught"] = c["media_caught"] = 0
+        note = "♻️ Statistika sıfırlandı"
+    else:
+        return ""
+    state.save()
+    return note
 
 
 def register(ub):
@@ -325,33 +409,40 @@ def register(ub):
             return
 
         if arg in ("clear", "təmizlə", "temizle"):
-            _msg_cache.clear()
-            _mid_to_chat.clear()
-            if os.path.isdir(MEDIA_CACHE_DIR):
-                for f in os.listdir(MEDIA_CACHE_DIR):
-                    try:
-                        os.remove(os.path.join(MEDIA_CACHE_DIR, f))
-                    except OSError:
-                        pass
+            clear_cache()
             await temp_edit(event, "🧹 <b>Anti-Delete keşi təmizləndi!</b>", delay=2)
             return
 
-        # Cari vəziyyət xülasəsi
-        is_on = state.cfg.get("on", False)
-        mode = "🔒 Yalnız Şəxsi (DM)" if state.cfg.get("mode") == "dm" else "🌐 Bütün Çatlar"
-        media_st = "✅ Aktiv" if state.cfg.get("save_media", True) else "🔴 Söndürülüb"
-        caught = state.cfg.get("caught", 0)
-        media_caught = state.cfg.get("media_caught", 0)
-        cached_now = len(_msg_cache)
+        # Arqumentsiz: düymələrlə kart (inline mümkün deyilsə sadə mətn)
+        if getattr(ub, "cards", None) is None:
+            await safe_edit(event, status_text(state))
+            return
+        out = Out(ub, event)
 
-        text = (
-            "🛡 <b>Anti-Delete Monitoru</b>\n\n"
-            f"• <b>Status:</b> {'🟢 Aktiv' if is_on else '🔴 Söndürülüb'}\n"
-            f"• <b>İzləmə Sahəsi:</b> {mode}\n"
-            f"• <b>Media Tutma:</b> {media_st}\n"
-            f"• <b>Keşdəki Mesajlar:</b> {cached_now}\n"
-            f"• <b>Tutulan Silinmiş Mesajlar:</b> {caught} ədəd\n"
-            f"• <b>Tutulan Medialar:</b> {media_caught} ədəd\n\n"
-            "<i>Dəyişmək üçün: .antidelete on | off | dm | all | media on | clear</i>"
-        )
-        await safe_edit(event, text)
+        def rows_for(o):                                  # 🔄 kartın öz sətrindədir (Out.kb) — təkrar düymə yox
+            return [r for r in ([o.btn(label, action) for label, action in row if action != "r"] for row in layout(state)) if r]
+
+        def make(action):
+            async def handler(o, cb):
+                await o.update(status_text(state, apply(state, action)), rows=rows_for(o))
+            return handler
+        for _, action in (b for row in layout(state) for b in row if b[1] != "r"):
+            out.on(action)(make(action))
+        out.refresh = lambda o: o.update(status_text(state), rows=rows_for(o))
+        await out.open(status_text(state), rows_for(out))
+
+    # ───────── 🛡 .menu → ⚡ Funksiyalar bölməsi (eyni düymələr) ─────────
+    def section_view(sctx, note=""):
+        rows = [[sctx.btn(sctx.tr(label), action) for label, action in row] for row in layout(state)]
+        rows.append(sctx.nav())
+        return status_text(state, note), InlineKeyboardMarkup(inline_keyboard=rows)
+
+    @ub.section("antidelete", "🛡 Anti-Delete", order=43)
+    async def render_section(sctx):
+        return section_view(sctx)
+
+    @ub.on_section("antidelete")
+    async def handle_section(sctx):
+        note = apply(state, sctx.action)
+        await sctx.answer()
+        await sctx.show(*section_view(sctx, note))
