@@ -32,22 +32,21 @@ def test_every_wrapped_string_is_translated():
     i18n.reload()
     keys = set(i18n.source_keys())
     missing = {s: f for s, f in _literals().items() if s not in keys}
-    assert not missing, "Tərcümə yoxdur (common/i18n_extra.py-a əlavə edin):\n" + "\n".join(
+    assert not missing, "Tərcümə yoxdur (lang/en.json, ru.json, tr.json-a əlavə edin):\n" + "\n".join(
         f"{f}: {s[:80]!r}" for s, f in list(missing.items())[:15])
 
 
 def test_placeholders_match_in_all_languages():
     i18n.reload()
     bad = []
-    for key, tr in i18n.CATALOG.items():
-        ph = set(re.findall(r"\{(\w+)\}", key))
-        for lang in ("en", "ru", "tr"):
-            if lang in tr and set(re.findall(r"\{(\w+)\}", tr[lang])) != ph:
+    for lang in ("en", "ru", "tr"):
+        for key, tr in i18n.STRINGS[lang].items():
+            if set(re.findall(r"\{(\w+)\}", tr)) != set(re.findall(r"\{(\w+)\}", key)):
                 bad.append((lang, key[:50]))
     assert not bad, bad[:10]
 
 
 def test_all_three_languages_have_every_key():
     i18n.reload()
-    for key, tr in i18n.CATALOG.items():
-        assert all(tr.get(l) for l in ("en", "ru", "tr")), key[:60]
+    for key in i18n.source_keys():
+        assert all(i18n.STRINGS[l].get(key) for l in ("en", "ru", "tr")), key[:60]

@@ -175,7 +175,7 @@ def setup(context):
                  btn("🔁 Faylları yenidən oxu", "ln:reload")],
                 [btn("➕ Dil faylı yüklə", "ln:add"), btn("📤 Şablon", "ln:tpl")],
                 [btn(f"📤 {c}", f"ln:exp:{c}") for c in i18n.LANGS if c != "az"][:6]]
-        removable = [c for c, r in i18n.REPORT.items() if r.get("file") and c not in i18n.BUILTIN_NAMES]
+        removable = [c for c, r in i18n.REPORT.items() if r.get("file")]
         if removable:
             rows.append([btn(f"🗑 {c}", f"ln:del:{c}") for c in removable][:6])
         if uc and not (state["bcast"] and not state["bcast"].get("done")):

@@ -24,6 +24,7 @@ import gzip
 import hashlib
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -85,6 +86,38 @@ def _run(cmd: list, env: dict, timeout: int = 1800):
         err = (r.stderr or r.stdout or "").strip().splitlines()
         raise RuntimeError(f"{os.path.basename(cmd[0])} xətası: {' | '.join(err[-3:])[:400]}")
     return r
+
+
+_EXT_TOC = re.compile(r"^\s*\d+;\s+\d+\s+\d+\s+(?:COMMENT\s+-\s+)?EXTENSION\b")
+
+
+def restore_list(dump_path, env) -> str | None:
+    """pg_restore -L üçün siyahı: EXTENSION qeydləri (və onların şərhi) çıxarılır → temp fayl yolu (alınmasa None).
+
+    Səbəb: `--clean` dump-dakı `DROP EXTENSION pg_trgm` işlədir, extension isə adətən postgres superuser-i (install.sh) və ya
+    başqa sahib tərəfindən yaradılır → adi baza istifadəçisi «must be owner of extension pg_trgm» ilə bərpanı yarıda kəsir
+    (VDS-ə köçürmədə baş verdi). Extension bərpa olunmur, yalnız mövcud olması təmin edilir (restore())."""
+    try:
+        r = subprocess.run([_pg_bin("pg_restore"), "-l", str(dump_path)], env=env, capture_output=True, text=True, timeout=300)
+    except (OSError, subprocess.SubprocessError) as e:
+        logger.debug(f"pg_restore -l alınmadı: {e}")
+        return None
+    if r.returncode != 0 or not r.stdout.strip():
+        return None
+    kept = [ln for ln in r.stdout.splitlines() if not _EXT_TOC.match(ln)]
+    fd, path = tempfile.mkstemp(prefix="pg_toc_", suffix=".list")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write("\n".join(kept) + "\n")
+    return path
+
+
+def ensure_extension(env, name: str = "pg_trgm") -> None:
+    """Extension yoxdursa yaratmağa çalış (pg_trgm «trusted»dir: PG13+ adi istifadəçi də yarada bilər). Alınmazsa səssiz keç —
+    indekslər sonra xəta verərsə pg_restore özü bildirəcək."""
+    try:
+        _run([_pg_bin("psql"), "-qAt", "-c", f"CREATE EXTENSION IF NOT EXISTS {name}"], env, timeout=60)
+    except Exception as e:
+        logger.debug(f"extension {name} yaradılmadı: {e}")
 
 
 def pg_table_counts(db) -> dict:
@@ -455,9 +488,16 @@ def restore(kind: str, conn, lock, db_path: str) -> Snapshot:
         env = _pg_env(conn.dsn)
         env["PGOPTIONS"] = "-c lock_timeout=60s"     # aktiv sorğu cədvəli tutubsa sonsuz gözləməsin
         # --single-transaction: xəta olsa heç nə dəyişmir; --clean: dump-dakı cədvəllər yenidən yaradılır
-        _run([_pg_bin("pg_restore"), "--clean", "--if-exists", "--no-owner", "--no-acl",
-              "--single-transaction", "--exit-on-error", "-d", env.get("PGDATABASE") or conn.dsn,
-              str(db_path)], env)
+        toc = restore_list(db_path, env)              # extension-lar çıxarılır (sahibi başqadırsa DROP xəta verirdi)
+        ensure_extension(env)
+        cmd = [_pg_bin("pg_restore"), "--clean", "--if-exists", "--no-owner", "--no-acl",
+               "--single-transaction", "--exit-on-error", "-d", env.get("PGDATABASE") or conn.dsn]
+        if toc:
+            cmd += ["-L", toc]
+        try:
+            _run(cmd + [str(db_path)], env)
+        finally:
+            cleanup(toc)
         if hasattr(conn, "reload_caches"):            # ayar / premium keşi köhnə dəyərləri saxlamasın
             conn.reload_caches()
         return pre
